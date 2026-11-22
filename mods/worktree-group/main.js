@@ -1,7 +1,7 @@
 // Worktree groups: one Space holding git worktrees of several sibling repos, plus shared files.
 //
 // Opened by the `spaces-wg` sidebar (a clone of `spaces`) on right-click, and by itself as
-// dialogs. props: { mode: "menu" | "create" | "edit" | "sync" | "archive" | "archives", space, folder?, force? }
+// dialogs. props: { mode: "menu" | "create" | "edit" | "sync" | "archive" | "archives" | "open", space, folder?, force? }
 //
 // A group folder contains `.herdr-worktree-group.json`:
 //   { version: 1, sourceParentPath, branchName, repos: ["repoA"], copied: ["AGENTS.md", ".skills"] }
@@ -45,6 +45,7 @@ export default class WorktreeGroup extends View {
     this.targetInfo = null; // create: { target, taken }
     this.token = 0;
     this.archives = []; // archives screen
+    this.groups = []; // open screen
     this.stage = null;
     this.target = null;
     this.dirty = [];
@@ -74,6 +75,7 @@ export default class WorktreeGroup extends View {
     const settings = await readTextFile(join(appHome(), "settings.json")).catch(() => null);
     this.groupsRoot = join(worktreesDirFromSettings(settings, home()), "groups");
     if (this.mode === "archives") return this.loadArchives(); // global: needs no Space
+    if (this.mode === "open") { this.groups = await lib.listGroups(this.groupsRoot); return; }
     const s = this.space;
     if (!s) throw new Error("That space is gone.");
     if (s.machine) { this.info = { git: null, pw: null, remote: true }; return; }
@@ -170,9 +172,9 @@ export default class WorktreeGroup extends View {
       out.push(["New worktree", "worktree", { space: s.id, action: "new" }], ["Open worktree", "worktree", { space: s.id, action: "open" }]);
       if (i.linked) out.push(["Remove worktree", "worktree", { space: s.id, action: "remove" }]);
     }
-    if (!i.git && !i.pw && !i.remote) out.push(["Create worktree group from folder", "pw", "create"], ["Archived worktree groups…", "pw", "archives"]);
+    if (!i.git && !i.pw && !i.remote) out.push(["Create worktree group from folder", "pw", "create"], ["Open worktree group…", "pw", "open"], ["Archived worktree groups…", "pw", "archives"]);
     if (i.pw) {
-      out.push(["Edit group repos", "pw", "edit"], ["Sync shared files", "pw", "sync"], ["Archive worktree group", "pw", "archive"], ["Archived worktree groups…", "pw", "archives"]);
+      out.push(["Edit group repos", "pw", "edit"], ["Sync shared files", "pw", "sync"], ["Archive worktree group", "pw", "archive"], ["Open worktree group…", "pw", "open"], ["Archived worktree groups…", "pw", "archives"]);
     }
     out.push(["Close", "space.close", { id: s?.id }]);
     return out;
@@ -184,7 +186,7 @@ export default class WorktreeGroup extends View {
     this.close();
     if (it[1] === "worktree") openOverlay({ mod: "worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : { width: 440, height: 260 }), props: it[2] });
     else if (it[1] === "pw") {
-      const size = { create: [480, 640], edit: [480, 480], sync: [480, 340], archive: [480, 380], archives: [600, 520] }[it[2]];
+      const size = { create: [480, 640], edit: [480, 480], sync: [480, 340], archive: [480, 380], archives: [600, 520], open: [600, 520] }[it[2]];
       openOverlay({ mod: "worktree-group", kind: "dialog", width: size[0], height: size[1], props: { mode: it[2], space: this.space.id, folder: this.folder } });
     } else run(it[1], it[2]);
   }
@@ -263,6 +265,47 @@ export default class WorktreeGroup extends View {
     run("space.close", { id: this.space.id, confirmed: true });
     toast("Worktree group archived", `Moved to ${r.target}. Restore it from “Archived worktree groups…”.`, "success");
     return true;
+  }
+
+  // ----- open a group -----
+
+  // The Space already showing this group (its folder or one inside it), if any.
+  spaceFor(dir) {
+    const inside = (f) => f && (f === dir || f.startsWith(`${dir}/`));
+    return spaces().find((s) => inside(s.folder) || inside(place(s)));
+  }
+
+  openGroup(g) {
+    const existing = this.spaceFor(g.dir);
+    this.close();
+    if (existing) run("space.select", { id: existing.id });
+    else run("space.new", { name: `${base(g.meta.sourceParentPath)} · ${g.meta.branchName}`, folder: g.dir, focus: true });
+  }
+
+  renderOpen() {
+    const t = theme();
+    return v_flex().id("pw-open").track_focus(this.handle).size_full().min_h(0).p(18).gap(10).rounded(8).bg(t.popover).text_size(13)
+      .on_key_down((e, cx) => { if (e.key === "escape") this.close(); else return; cx.stop_propagation(); })
+      .child(h_flex().items_center()
+        .child(div().flex_1().text_size(15).font_semibold().text_color(t.foreground).child("Open worktree group"))
+        .child(div().text_size(11).text_color(t.dim).child("Esc")))
+      .child(div().text_size(11).text_color(t.dim).truncate().child(this.groupsRoot ?? ""))
+      .when(!this.ready, (el) => el.child(div().text_size(11).text_color(t.muted).child("Looking…")))
+      .when(!!this.error, (el) => el.child(div().text_size(12).text_color(t.blocked).child(this.error)))
+      .when(this.ready && this.groups.length === 0, (el) => el.child(div().text_color(t.muted).child("No worktree groups yet. Create one from a folder that contains repositories.")))
+      .when(this.ready && this.groups.length > 0, (el) => el.child(div().id("pw-open-list").flex_1().min_h(0).overflow_y_scrollbar().rounded(6).border_1().border_color(t.border).p(6)
+        .children(this.groups.map((g, i) => {
+          const open = this.spaceFor(g.dir);
+          return v_flex().id(`pw-og-${i}`).gap(3).p(9).mb(6).rounded(6).bg(t.surface).cursor_pointer().hover((s) => s.bg(t.hover))
+            .on_click(() => this.openGroup(g))
+            .child(h_flex().items_center().gap(8)
+              .child(div().flex_1().truncate().font_semibold().text_color(t.foreground).child(`${base(g.meta.sourceParentPath)} · ${g.meta.branchName}`))
+              .child(div().text_size(11).text_color(open ? t.working : t.dim).child(open ? "open in a Space" : "closed")))
+            .child(div().text_size(11).text_color(t.muted).truncate().child(g.meta.repos.length ? `Repos: ${g.meta.repos.join(", ")}` : "No repos"))
+            .child(div().text_size(10.5).text_color(t.dim).truncate().child(g.dir));
+        }))))
+      .child(h_flex().justify_end().gap(8).text_size(12)
+        .child(this.button("pw-cancel", "Close", t.raised, t.foreground, true, () => this.close())));
   }
 
   // ----- the archive screen -----
@@ -426,6 +469,7 @@ export default class WorktreeGroup extends View {
   render(cx) {
     if (this.mode === "menu") return this.renderMenu(cx);
     if (this.mode === "archives") return this.renderArchives(cx);
+    if (this.mode === "open") return this.renderOpen();
     const t = theme();
     const titles = { create: "Create worktree group", edit: "Edit group repos", sync: "Sync shared files", archive: "Archive worktree group?" };
     const archive = this.mode === "archive";

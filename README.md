@@ -30,6 +30,9 @@ active Space's folder).
   existing, remote-only (will track it) or in use (blocked).
 - **Edit group repos**: tick to add, untick to remove. A review screen lists what will happen first.
 - **Sync shared files**: copies the files chosen at creation again, overwriting same-named ones.
+- **Open worktree group…** (Space menu, and the tab bar's **+** menu): lists your groups (open ones are
+  marked) and opens a Space on the one you click, or switches to its Space if it is already open. Use it
+  to bring back a group whose Space you closed. Groups made in the older sibling layout are not listed.
 - **Archive worktree group**: moves the whole group to `<groups>/.archive/...` and closes its Space. Nothing
   is deleted: uncommitted changes, copied files and branches are kept.
 - **Archived worktree groups…** (Space menu, and the tab bar's **+** menu): lists the archives with their

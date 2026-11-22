@@ -386,6 +386,19 @@ export function createLib({ exec, readTextFile, writeTextFile }) {
     return { target: origin };
   }
 
+  // The active (not archived) groups under <groupsRoot>/<parent>/<group>, by parent then name.
+  // Groups made in the older sibling layout are not found here. -> [{ dir, meta }]
+  async function listGroups(groupsRoot) {
+    const r = await exec("find", [groupsRoot, "-mindepth", "2", "-maxdepth", "2", "-type", "d", "-not", "-path", join(groupsRoot, ".archive", "*")]);
+    if (r.code !== 0) return [];
+    const out = [];
+    for (const dir of r.stdout.split("\n").filter(Boolean)) {
+      const found = await findMeta(dir);
+      if (found && found.dir === dir && !found.meta.archived) out.push(found);
+    }
+    return out.sort((a, b) => a.dir.localeCompare(b.dir));
+  }
+
   // The archived groups under <groupsRoot>/.archive, newest first. -> [{ dir, meta }]
   async function listArchivedGroups(groupsRoot) {
     const r = await exec("find", [join(groupsRoot, ".archive"), "-mindepth", "2", "-maxdepth", "2", "-type", "d"]);
@@ -412,5 +425,5 @@ export function createLib({ exec, readTextFile, writeTextFile }) {
 
   return { git, exists, isGitRepo, scanFolder, childRepos, copyEntry, findMeta, writeMeta, addWorktree, inspectBranch, inspectRepos, groupTarget,
     createWorktreeGroup, appendWorktrees, removeWorktrees, applyRepoChanges, syncGroupFiles, destroyWorktreeGroup,
-    archiveWorktreeGroup, restoreWorktreeGroup, listArchivedGroups, dirtyRepos };
+    archiveWorktreeGroup, restoreWorktreeGroup, listGroups, listArchivedGroups, dirtyRepos };
 }

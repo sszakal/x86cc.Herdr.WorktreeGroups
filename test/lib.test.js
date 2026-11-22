@@ -559,3 +559,19 @@ describe("archive", () => {
     assert.equal((await worktreePaths(join(parent, "a"))).length, 1);
   });
 });
+
+describe("listing groups", () => {
+  test("listGroups finds active groups only, sorted, and ignores the archive", async () => {
+    const parent = await makeParent(["a"]);
+    const mk = (branch) => lib.createWorktreeGroup({ groupsRoot: root(parent), source: parent, branch, repos: ["a"] });
+    const g1 = await mk("beta");
+    const g2 = await mk("alpha");
+    const g3 = await mk("gone");
+    await lib.archiveWorktreeGroup({ dir: g3.target, meta: (await lib.findMeta(g3.target)).meta, groupsRoot: root(parent) });
+    const list = await lib.listGroups(root(parent));
+    assert.deepEqual(list.map((g) => g.meta.branchName), ["alpha", "beta"]);
+    assert.deepEqual(list.map((g) => g.dir), [g2.target, g1.target]);
+    assert.deepEqual(await lib.listGroups(join(tmp, "no-such-root")), []);
+  });
+});
+

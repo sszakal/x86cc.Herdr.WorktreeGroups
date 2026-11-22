@@ -12,8 +12,9 @@ The Space right-click menu (a popup, 270px wide, Herdr's popover colors, 31px ro
 the stock items (Rename, New/Open/Remove worktree for git spaces, Close) plus:
 
 - on a folder that is not a git repo: **Create worktree group from folder**;
-- on a group Space: **Edit group repos**, **Sync shared files**, **Archive worktree group**, **Archived worktree groups…**;
-- on a non-git, non-group Space: also **Archived worktree groups…**; the tab bar's **+** menu has the same row.
+- on a group Space: **Edit group repos**, **Sync shared files**, **Archive worktree group**, **Open worktree group…**, **Archived worktree groups…**;
+- on a non-git, non-group Space: also **Open worktree group…** and **Archived worktree groups…**; the tab bar's
+  **+** menu has the same two rows (popup 605px tall).
 
 Dialogs (480px wide, popover background, 18px padding, 15px semibold title, "Esc" hint on the right, the
 folder path in dim 11px text under the title):
@@ -29,6 +30,9 @@ folder path in dim 11px text under the title):
 - **Sync shared files:** lists the stored files and warns that same-named files are overwritten.
 - **Archive worktree group:** a confirmation saying nothing is deleted, listing repos with uncommitted changes
   (they move along), button **Archive group**.
+- **Open worktree group** (600px wide): one clickable card per active group (name, "open in a Space" in the
+  `working` color or dim "closed", repos, path). A click opens a Space on the group (`space.new`) or selects the
+  Space already showing it (`space.select`). Found by scanning `<groupsRoot>/*/*` for the metadata file.
 - **Archived worktree groups** (600px wide): one card per archive (name, archived date, repos, path, amber
   "Uncommitted changes in: ..."), buttons **Restore** and a red-outlined **Delete permanently…** that opens a
   confirmation (what is removed, uncommitted work in red, Force checkbox) with Back / Close / **Delete permanently**.
@@ -59,7 +63,7 @@ folder path in dim 11px text under the title):
 
 - `mods/worktree-group/` (`mod.json` `{ "place": "none" }`): `lib.js` has all logic with injected `exec` /
   `readTextFile` / `writeTextFile` and no `herdr` imports (unit tested); `main.js` is one `View` with modes
-  `menu | create | edit | sync | archive | archives`, opened with `openOverlay({ mod: "worktree-group", kind: "popup" | "dialog", props })`.
+  `menu | create | edit | sync | archive | archives | open`, opened with `openOverlay({ mod: "worktree-group", kind: "popup" | "dialog", props })`.
 - `mods/tabs-wg/` and `mods/new-menu-wg/`: clones of `tabs` and `new-menu`; the tab bar's **+** opens `new-menu-wg`,
   which adds a **New worktree group…** row (opens `worktree-group` with `{ mode: "create", space, folder }`, the active
   Space and focused pane folder; the popup is 270px wide and 543px tall).
