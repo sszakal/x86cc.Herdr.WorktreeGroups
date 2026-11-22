@@ -381,10 +381,12 @@ describe("branch inspection", () => {
     const parent = await makeParent(["a"]);
     let i = await lib.inspectBranch(join(parent, "a"), "main");
     assert.equal(i.state, "in-use");
-    assert.equal(i.usedAt, join(parent, "a"));
+    // git reports real paths (on macOS /var is a symlink to /private/var)
+    assert.equal(await fs.realpath(i.usedAt), await fs.realpath(join(parent, "a")));
     await git(join(parent, "a"), "worktree", "add", "-b", "busy", join(tmp, `busy-${n}`));
     i = await lib.inspectBranch(join(parent, "a"), "busy");
-    assert.deepEqual([i.state, i.usedAt], ["in-use", join(tmp, `busy-${n}`)]);
+    assert.equal(i.state, "in-use");
+    assert.equal(await fs.realpath(i.usedAt), await fs.realpath(join(tmp, `busy-${n}`)));
   });
   test("a branch only on a remote is created tracking it", async () => {
     const parent = await makeParent(["a"]);
