@@ -1,6 +1,7 @@
 # Plan: archived worktree groups (not implemented yet)
 
-Status: **logic built and tested** (`lib.js`: `archiveWorktreeGroup`, `restoreWorktreeGroup`,
+Status: **built** (logic, tests, confirmation, archive screen, entry points). Original plan below.
+Previously: **logic built and tested** (`lib.js`: `archiveWorktreeGroup`, `restoreWorktreeGroup`,
 `listArchivedGroups`, `dirtyRepos`; permanent delete reuses `destroyWorktreeGroup`). **UI not built yet**:
 the confirmation, the archive screen and the entry points below.
 

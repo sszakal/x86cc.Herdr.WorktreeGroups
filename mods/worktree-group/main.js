@@ -1,7 +1,7 @@
 // Worktree groups: one Space holding git worktrees of several sibling repos, plus shared files.
 //
 // Opened by the `spaces-wg` sidebar (a clone of `spaces`) on right-click, and by itself as
-// dialogs. props: { mode: "menu" | "create" | "edit" | "sync" | "destroy", space, folder?, force? }
+// dialogs. props: { mode: "menu" | "create" | "edit" | "sync" | "archive" | "archives", space, folder?, force? }
 //
 // A group folder contains `.herdr-worktree-group.json`:
 //   { version: 1, sourceParentPath, branchName, repos: ["repoA"], copied: ["AGENTS.md", ".skills"] }
@@ -44,6 +44,11 @@ export default class WorktreeGroup extends View {
     this.branchInfo = {}; // repo -> inspectBranch result, for the current branch name
     this.targetInfo = null; // create: { target, taken }
     this.token = 0;
+    this.archives = []; // archives screen
+    this.stage = null;
+    this.target = null;
+    this.dirty = [];
+    this.needForce = false;
     this.info = { git: null, pw: null }; // menu facts
     this.name = ""; // the user must type a name
     this.input = InputState.new({ value: "", placeholder: "Group / branch name (required)" });
@@ -66,6 +71,9 @@ export default class WorktreeGroup extends View {
 
   // Reads what this mode needs.
   async load() {
+    const settings = await readTextFile(join(appHome(), "settings.json")).catch(() => null);
+    this.groupsRoot = join(worktreesDirFromSettings(settings, home()), "groups");
+    if (this.mode === "archives") return this.loadArchives(); // global: needs no Space
     const s = this.space;
     if (!s) throw new Error("That space is gone.");
     if (s.machine) { this.info = { git: null, pw: null, remote: true }; return; }
@@ -86,8 +94,6 @@ export default class WorktreeGroup extends View {
     if (this.mode === "create") {
       if (this.info.git) throw new Error("This folder is a git repository, not a folder that contains repositories.");
       if (found) throw new Error("This Space is already a worktree group.");
-      const settings = await readTextFile(join(appHome(), "settings.json")).catch(() => null);
-      this.groupsRoot = join(worktreesDirFromSettings(settings, home()), "groups");
       const scan = await scanFolder(this.folder);
       this.list = scan.repos;
       this.checked = new Set(); // repos are never preselected: the user picks explicitly
@@ -104,10 +110,19 @@ export default class WorktreeGroup extends View {
     } else if (this.mode === "sync") {
       if (!found) throw new Error("This space is not a parent worktree.");
       this.list = [...(found.meta.copied ?? [])];
-    } else if (this.mode === "destroy") {
-      if (!found) throw new Error("This space is not a parent worktree.");
+    } else if (this.mode === "archive") {
+      if (!found) throw new Error("This space is not a worktree group.");
       this.list = [...found.meta.repos];
+      this.dirty = await lib.dirtyRepos(found); // repos with uncommitted changes (they move along)
     }
+  }
+
+  // The archive screen: every archived group, with the repos that have uncommitted work.
+  async loadArchives() {
+    this.archives = await lib.listArchivedGroups(this.groupsRoot);
+    for (const a of this.archives) a.dirty = await lib.dirtyRepos(a);
+    this.stage = "list";
+    this.target = null;
   }
 
   // Looks at the branch name in every repo (and the group's folder) so the dialog can warn early.
@@ -155,9 +170,9 @@ export default class WorktreeGroup extends View {
       out.push(["New worktree", "worktree", { space: s.id, action: "new" }], ["Open worktree", "worktree", { space: s.id, action: "open" }]);
       if (i.linked) out.push(["Remove worktree", "worktree", { space: s.id, action: "remove" }]);
     }
-    if (!i.git && !i.pw && !i.remote) out.push(["Create worktree group from folder", "pw", "create"]);
+    if (!i.git && !i.pw && !i.remote) out.push(["Create worktree group from folder", "pw", "create"], ["Archived worktree groups…", "pw", "archives"]);
     if (i.pw) {
-      out.push(["Edit group repos", "pw", "edit"], ["Sync shared files", "pw", "sync"], ["Delete worktree group", "pw", "destroy"]);
+      out.push(["Edit group repos", "pw", "edit"], ["Sync shared files", "pw", "sync"], ["Archive worktree group", "pw", "archive"], ["Archived worktree groups…", "pw", "archives"]);
     }
     out.push(["Close", "space.close", { id: s?.id }]);
     return out;
@@ -169,8 +184,8 @@ export default class WorktreeGroup extends View {
     this.close();
     if (it[1] === "worktree") openOverlay({ mod: "worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : { width: 440, height: 260 }), props: it[2] });
     else if (it[1] === "pw") {
-      const tall = it[2] === "destroy" || it[2] === "sync" ? 340 : it[2] === "create" ? 640 : 480;
-      openOverlay({ mod: "worktree-group", kind: "dialog", width: 480, height: tall, props: { mode: it[2], space: this.space.id, folder: this.folder } });
+      const size = { create: [480, 640], edit: [480, 480], sync: [480, 340], archive: [480, 380], archives: [600, 520] }[it[2]];
+      openOverlay({ mod: "worktree-group", kind: "dialog", width: size[0], height: size[1], props: { mode: it[2], space: this.space.id, folder: this.folder } });
     } else run(it[1], it[2]);
   }
 
@@ -242,16 +257,68 @@ export default class WorktreeGroup extends View {
     return failures.length === 0;
   }
 
-  async destroy() {
-    const r = await lib.destroyWorktreeGroup({ ...this.pw, force: this.force });
-    if (!r.ok) {
-      toast("Worktree group not removed", r.failures.join("\n") + (this.force ? "" : "\nTick “Force” to discard uncommitted changes."));
-      return false;
-    }
-    if (r.folderKept) toast("Folder kept", `${this.pw.dir} still has other files, so it was not deleted.`, "warning");
+  // Archive: move the group aside (nothing is deleted) and close its Space.
+  async archive() {
+    const r = await lib.archiveWorktreeGroup({ ...this.pw, groupsRoot: this.groupsRoot });
     run("space.close", { id: this.space.id, confirmed: true });
-    toast("Worktree group deleted", `Branch ${this.pw.meta.branchName} was left in the source repos.`, "success");
+    toast("Worktree group archived", `Moved to ${r.target}. Restore it from “Archived worktree groups…”.`, "success");
     return true;
+  }
+
+  // ----- the archive screen -----
+
+  restore(item, cx) {
+    if (this.busy) return;
+    this.busy = true;
+    this.error = "";
+    cx.notify();
+    cx.spawn(async (cx) => {
+      let done = false;
+      try {
+        const r = await lib.restoreWorktreeGroup(item);
+        run("space.new", { name: `${base(item.meta.sourceParentPath)} · ${item.meta.branchName}`, folder: r.target, focus: true });
+        toast("Worktree group restored", r.target, "success");
+        done = true;
+      } catch (e) {
+        this.error = String(e).replace(/^Error: /, "");
+        toast("Could not restore", this.error);
+      }
+      this.busy = false;
+      if (done) this.close();
+      cx.notify();
+    });
+  }
+
+  // Permanent deletion, only reachable here, after its own confirmation.
+  deletePermanently(cx) {
+    const item = this.target;
+    if (this.busy || !item) return;
+    this.busy = true;
+    this.error = "";
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const r = await lib.destroyWorktreeGroup({ dir: item.dir, meta: item.meta, force: this.force });
+        if (!r.ok) {
+          this.needForce = true;
+          this.error = r.failures.join("\n");
+          toast("Not deleted", r.failures.join("\n") + (this.force ? "" : "\nTick “Force” to discard uncommitted changes."));
+        } else {
+          await exec("rmdir", [item.dir.slice(0, item.dir.lastIndexOf("/"))]); // the parent's archive folder, if now empty
+          this.archives = this.archives.filter((a) => a !== item);
+          this.stage = "list";
+          this.target = null;
+          this.force = false;
+          this.needForce = false;
+          toast("Archived group deleted", `${base(item.dir)} was removed permanently. Branches were kept.`, "success");
+        }
+      } catch (e) {
+        this.error = String(e).replace(/^Error: /, "");
+        toast("Could not delete", this.error);
+      }
+      this.busy = false;
+      cx.notify();
+    });
   }
 
   // ----- drawing -----
@@ -262,6 +329,47 @@ export default class WorktreeGroup extends View {
       .when(enabled, (el) => el.cursor_pointer().hover((s) => s.opacity(0.88)).on_click(onClick))
       .when(!enabled, (el) => el.opacity(0.4))
       .child(label);
+  }
+
+  smallButton(id, label, danger, onClick) {
+    const t = theme();
+    return h_flex().id(id).h(26).px(11).items_center().rounded(6).border_1().border_color(danger ? t.blocked : t.input).bg(t.raised)
+      .text_size(12).text_color(danger ? t.blocked : t.foreground).cursor_pointer().hover((s) => s.opacity(0.85)).on_click(onClick).child(label);
+  }
+
+  renderArchives(cx) {
+    const t = theme();
+    const del = this.stage === "delete" ? this.target : null;
+    const when = (iso) => String(iso ?? "").slice(0, 16).replace("T", " ");
+    const showForce = !!del && (del.dirty.length > 0 || this.needForce);
+    return v_flex().id("pw-archives").track_focus(this.handle).size_full().min_h(0).p(18).gap(10).rounded(8).bg(t.popover).text_size(13)
+      .on_key_down((e, cx) => { if (e.key === "escape") this.close(); else return; cx.stop_propagation(); })
+      .child(h_flex().items_center()
+        .child(div().flex_1().text_size(15).font_semibold().text_color(t.foreground).child(del ? "Delete archived group permanently?" : "Archived worktree groups"))
+        .child(div().text_size(11).text_color(t.dim).child("Esc")))
+      .child(div().text_size(11).text_color(t.dim).truncate().child(`${this.groupsRoot ?? ""}/.archive`))
+      .when(!this.ready, (el) => el.child(div().text_size(11).text_color(t.muted).child("Looking…")))
+      .when(this.ready && !del && this.archives.length === 0, (el) => el.child(div().text_color(t.muted).child("No archived worktree groups. Archive a group from its Space menu and it will show up here.")))
+      .when(this.ready && !del && this.archives.length > 0, (el) => el.child(div().id("pw-arch-list").flex_1().min_h(0).overflow_y_scrollbar().rounded(6).border_1().border_color(t.border).p(6)
+        .children(this.archives.map((a, i) => v_flex().id(`pw-arch-${i}`).gap(4).p(9).mb(6).rounded(6).bg(t.surface)
+          .child(h_flex().items_center().gap(8)
+            .child(div().flex_1().truncate().font_semibold().text_color(t.foreground).child(`${base(a.meta.sourceParentPath)} · ${a.meta.branchName}`))
+            .child(div().text_size(11).text_color(t.dim).child(`archived ${when(a.meta.archivedAt)}`)))
+          .child(div().text_size(11).text_color(t.muted).truncate().child(a.meta.repos.length ? `Repos: ${a.meta.repos.join(", ")}` : "No repos"))
+          .child(div().text_size(10.5).text_color(t.dim).truncate().child(a.dir))
+          .when(a.dirty.length > 0, (el) => el.child(div().text_size(11).text_color(t.working).child(`Uncommitted changes in: ${a.dirty.join(", ")}`)))
+          .child(h_flex().gap(8).pt(4)
+            .child(this.smallButton(`pw-restore-${i}`, this.busy ? "Working…" : "Restore", false, (_e, cx) => this.restore(a, cx)))
+            .child(this.smallButton(`pw-del-${i}`, "Delete permanently…", true, (_e, cx) => { this.target = a; this.stage = "delete"; this.force = false; this.needForce = false; this.error = ""; cx.notify(); })))))))
+      .when(!!del, (el) => el.child(v_flex().gap(8).flex_1().min_h(0)
+        .child(div().text_color(t.muted).child(`This permanently removes ${base(del.meta.sourceParentPath)} · ${del.meta.branchName}: the worktrees of ${del.meta.repos.join(", ") || "no repos"}, the copied files and the folder ${del.dir}. Branches stay in the source repos. This cannot be undone.`))
+        .when(del.dirty.length > 0, (e2) => e2.child(div().text_color(t.blocked).child(`Uncommitted changes in ${del.dirty.join(", ")} will be lost.`)))))
+      .when(showForce, (el) => el.child(this.check("pw-force", "Force (discard uncommitted changes)", this.force, () => { this.force = !this.force; })))
+      .when(!!this.error, (el) => el.child(div().text_size(12).text_color(t.blocked).child(this.error)))
+      .child(h_flex().justify_end().gap(8).text_size(12)
+        .when(!!del, (el) => el.child(this.button("pw-back", "Back", t.raised, t.foreground, true, (_e, cx) => { this.stage = "list"; this.target = null; this.error = ""; cx.notify(); })))
+        .child(this.button("pw-cancel", "Close", t.raised, t.foreground, true, () => this.close()))
+        .when(!!del, (el) => el.child(this.button("pw-ok", this.busy ? "Working…" : "Delete permanently", t.blocked, t.background, !this.busy, (_e, cx) => this.deletePermanently(cx)))));
   }
 
   check(id, label, on, onToggle, o = {}) {
@@ -317,16 +425,17 @@ export default class WorktreeGroup extends View {
 
   render(cx) {
     if (this.mode === "menu") return this.renderMenu(cx);
+    if (this.mode === "archives") return this.renderArchives(cx);
     const t = theme();
-    const titles = { create: "Create worktree group", edit: "Edit group repos", sync: "Sync shared files", destroy: "Delete worktree group?" };
-    const destroy = this.mode === "destroy";
+    const titles = { create: "Create worktree group", edit: "Edit group repos", sync: "Sync shared files", archive: "Archive worktree group?" };
+    const archive = this.mode === "archive";
     const create = this.mode === "create";
     const edit = this.mode === "edit";
     const plan = edit && this.ready ? this.plan() : { add: [], remove: [] };
     const review = edit && this.stage === "review";
     const valid = !this.busy && this.ready && !this.fatal &&
-      (create ? this.canCreate() : this.mode === "sync" ? this.list.length > 0 : destroy ? true : plan.add.length + plan.remove.length > 0);
-    const confirmLabel = this.busy ? "Working…" : { create: "Create", edit: review ? "Confirm and apply" : "Review changes…", sync: "Sync and overwrite", destroy: "Delete group" }[this.mode];
+      (create ? this.canCreate() : this.mode === "sync" ? this.list.length > 0 : archive ? true : plan.add.length + plan.remove.length > 0);
+    const confirmLabel = this.busy ? "Working…" : { create: "Create", edit: review ? "Confirm and apply" : "Review changes…", sync: "Sync and overwrite", archive: "Archive group" }[this.mode];
     const sub = create ? this.folder : this.pw?.dir;
     const target = create && cleanBranch(this.name) ? this.targetInfo?.target ?? null : null;
     const reused = create ? [...this.checked].filter((r) => ["existing", "remote"].includes(this.branchInfo[r]?.state)) : [];
@@ -337,8 +446,9 @@ export default class WorktreeGroup extends View {
         .child(div().flex_1().text_size(15).font_semibold().text_color(t.foreground).child(titles[this.mode]))
         .child(div().text_size(11).text_color(t.dim).child("Esc")))
       .child(div().text_size(11).text_color(t.dim).truncate().child(sub ?? ""))
-      .when(destroy && this.ready && this.pw, (el) => el.child(div().text_color(t.muted).child(
-        `This removes every repo worktree in ${this.pw.dir} (${this.list.join(", ") || "none"}), deletes the copied files (${(this.pw.meta.copied ?? []).join(", ") || "none"}) and ${META}, and closes this Space. The branch ${this.pw.meta.branchName} stays in the source repos. Uncommitted work in those worktrees is lost if you force.`)))
+      .when(archive && this.ready && this.pw, (el) => el.child(div().text_color(t.muted).child(
+        `Moves ${this.pw.dir} to the archive and closes this Space. Nothing is deleted: the worktrees of ${this.list.join(", ") || "no repos"}, any uncommitted changes, the copied files and the branches are all kept. Restore it later from “Archived worktree groups…”.`)))
+      .when(archive && this.ready && this.dirty?.length > 0, (el) => el.child(div().text_size(11).text_color(t.working).child(`Uncommitted changes in ${this.dirty.join(", ")} will move along with the group.`)))
       .when(this.mode === "sync" && this.ready && this.pw, (el) => el.child(div().text_color(t.muted).child(
         this.list.length
           ? `Copies these again from ${this.pw.meta.sourceParentPath}: ${this.list.join(", ")}. Files with the same name here are overwritten, so local edits to them are lost. Nothing is deleted.`
@@ -362,11 +472,11 @@ export default class WorktreeGroup extends View {
         .child(div().text_color(t.foreground).child(plan.add.length ? `Add worktrees on branch ${this.pw.meta.branchName}: ${plan.add.join(", ")}` : "Add: nothing"))
         .child(div().text_color(plan.remove.length ? t.blocked : t.foreground).child(plan.remove.length ? `Remove worktrees (their folders in the group are deleted): ${plan.remove.join(", ")}` : "Remove: nothing"))
         .when(plan.remove.length > 0 && plan.remove.length === this.groupRepos.length, (e2) => e2.child(div().text_size(11).text_color(t.muted).child("This removes every repo. The group stays (empty); use “Delete worktree group” to remove it.")))))
-      .when((review && plan.remove.length > 0) || destroy, (el) => el.child(this.check("pw-force", "Force (discard uncommitted changes)", this.force, () => { this.force = !this.force; })))
+      .when(review && plan.remove.length > 0, (el) => el.child(this.check("pw-force", "Force (discard uncommitted changes)", this.force, () => { this.force = !this.force; })))
       .when(!!this.error, (el) => el.child(div().text_size(12).text_color(t.blocked).child(this.error)))
       .child(h_flex().justify_end().gap(8).text_size(12)
         .when(review, (el) => el.child(this.button("pw-back", "Back", t.raised, t.foreground, true, (_e, cx) => { this.stage = "pick"; cx.notify(); })))
         .child(this.button("pw-cancel", "Cancel", t.raised, t.foreground, true, () => this.close()))
-        .child(this.button("pw-ok", confirmLabel, destroy ? t.blocked : t.solid, destroy ? t.background : t.solid_foreground, valid, (_e, cx) => this.go(cx))));
+        .child(this.button("pw-ok", confirmLabel, t.solid, t.solid_foreground, valid, (_e, cx) => this.go(cx))));
   }
 }

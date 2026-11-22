@@ -12,7 +12,8 @@ The Space right-click menu (a popup, 270px wide, Herdr's popover colors, 31px ro
 the stock items (Rename, New/Open/Remove worktree for git spaces, Close) plus:
 
 - on a folder that is not a git repo: **Create worktree group from folder**;
-- on a group Space: **Edit group repos**, **Sync shared files**, **Delete worktree group**.
+- on a group Space: **Edit group repos**, **Sync shared files**, **Archive worktree group**, **Archived worktree groups…**;
+- on a non-git, non-group Space: also **Archived worktree groups…**; the tab bar's **+** menu has the same row.
 
 Dialogs (480px wide, popover background, 18px padding, 15px semibold title, "Esc" hint on the right, the
 folder path in dim 11px text under the title):
@@ -26,8 +27,11 @@ folder path in dim 11px text under the title):
   under the list, then **Review changes...**. The review step lists adds and removals (removals in the red
   `blocked` color), shows a Force checkbox when something is removed, and has Back / Cancel / Confirm and apply.
 - **Sync shared files:** lists the stored files and warns that same-named files are overwritten.
-- **Delete worktree group:** confirmation text naming every worktree and file that goes, a Force checkbox,
-  and a red **Delete group** button.
+- **Archive worktree group:** a confirmation saying nothing is deleted, listing repos with uncommitted changes
+  (they move along), button **Archive group**.
+- **Archived worktree groups** (600px wide): one card per archive (name, archived date, repos, path, amber
+  "Uncommitted changes in: ..."), buttons **Restore** and a red-outlined **Delete permanently…** that opens a
+  confirmation (what is removed, uncommitted work in red, Force checkbox) with Back / Close / **Delete permanently**.
 
 ## How it behaves
 
@@ -43,15 +47,19 @@ folder path in dim 11px text under the title):
   that fails does not stop the others; failures show an error toast with git's message, and a dirty worktree
   hints at Force.
 - Sync re-copies only the files chosen at creation, overwriting; nothing is deleted.
-- Delete removes the worktrees (`git worktree remove [--force]`), the copied files, the metadata and the folder
-  (only if empty), then closes the Space. If any worktree fails, nothing else is removed. Branches are never deleted.
+- Archive moves the group to `<groupsRoot>/.archive/<parent>/<group>` (`-2`, `-3` when taken): each repo with
+  `git worktree move`, falling back to `mv` + `git worktree repair` when git refuses (submodules); everything else with
+  `mv`; all moved back on failure. The metadata gets `archived`, `archivedAt`, `archivedFrom`; the Space closes.
+- Restore moves it back to `archivedFrom` (refused if that folder exists) and opens a Space on it.
+- Delete permanently (archive screen only) removes the worktrees (`git worktree remove [--force]`), the copied files, the
+  metadata and the folder (only if empty). If any worktree fails, nothing else is removed. Branches are never deleted.
 - Local Spaces only; remote spaces get no group items.
 
 ## Built from
 
 - `mods/worktree-group/` (`mod.json` `{ "place": "none" }`): `lib.js` has all logic with injected `exec` /
   `readTextFile` / `writeTextFile` and no `herdr` imports (unit tested); `main.js` is one `View` with modes
-  `menu | create | edit | sync | destroy`, opened with `openOverlay({ mod: "worktree-group", kind: "popup" | "dialog", props })`.
+  `menu | create | edit | sync | archive | archives`, opened with `openOverlay({ mod: "worktree-group", kind: "popup" | "dialog", props })`.
 - `mods/tabs-wg/` and `mods/new-menu-wg/`: clones of `tabs` and `new-menu`; the tab bar's **+** opens `new-menu-wg`,
   which adds a **New worktree group…** row (opens `worktree-group` with `{ mode: "create", space, folder }`, the active
   Space and focused pane folder; the popup is 270px wide and 543px tall).
@@ -81,5 +89,5 @@ folder path in dim 11px text under the title):
 - Creating a group with repos a and b makes `<root>/groups/<parent>/<name>/{a,b}` on one branch, copies the ticked
   files, writes the metadata and opens a Space on it.
 - A branch already checked out elsewhere shows red and cannot be ticked.
-- Edit group repos adds and removes repos only after the review step; Delete worktree group removes everything it
-  listed and closes the Space.
+- Edit group repos adds and removes repos only after the review step; Archive moves the group aside without losing
+  uncommitted work and closes the Space; the archive screen restores it or deletes it permanently.

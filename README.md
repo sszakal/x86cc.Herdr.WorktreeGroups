@@ -30,8 +30,12 @@ active Space's folder).
   existing, remote-only (will track it) or in use (blocked).
 - **Edit group repos**: tick to add, untick to remove. A review screen lists what will happen first.
 - **Sync shared files**: copies the files chosen at creation again, overwriting same-named ones.
-- **Delete worktree group**: removes the worktrees, the copied files and the group folder, then closes
-  the Space. Branches are never deleted; clean them up with git.
+- **Archive worktree group**: moves the whole group to `<groups>/.archive/...` and closes its Space. Nothing
+  is deleted: uncommitted changes, copied files and branches are kept.
+- **Archived worktree groups…** (Space menu, and the tab bar's **+** menu): lists the archives with their
+  repos and any uncommitted work. **Restore** moves a group back and opens its Space; **Delete permanently…**
+  (with its own confirmation and a Force option for uncommitted changes) is the only way a group is deleted.
+  Branches are never deleted; clean them up with git.
 
 Groups live in `<worktrees.directory>/groups/<parent folder name>/<group>` (Herdr's
 `worktrees.directory` setting, default `~/.herdr/worktrees`). Two parents with the same folder name get
@@ -76,4 +80,4 @@ The dialogs need Herdr itself: use `herdr-app check mods/worktree-group` and try
 
 - Local Spaces only (remote machines are not supported).
 - Uses `find`, `cp`, `rm` and friends: Linux, and probably macOS (CI runs both). Windows is not supported yet.
-- Planned: archiving instead of deleting, see `docs/archive-feature-plan.md`.
+- Design notes for archiving: `docs/archive-feature-plan.md`.
