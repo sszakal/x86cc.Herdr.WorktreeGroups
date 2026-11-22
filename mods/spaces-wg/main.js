@@ -287,7 +287,7 @@ export default class Spaces extends View {
 
   menu(w) {
     // A popup is as tall as its items; height is only the most.
-    openOverlay({ mod: "worktree-group", kind: "popup", width: 200, height: 260, props: { mode: "menu", tab: "space", target: { id: w.id } } });
+    openOverlay({ mod: "worktree-group", kind: "popup", width: 270, height: 260, props: { mode: "menu", tab: "space", target: { id: w.id } } });
   }
 
   orderingDue(now) {

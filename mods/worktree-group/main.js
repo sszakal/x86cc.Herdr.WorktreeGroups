@@ -53,7 +53,7 @@ export default class WorktreeGroup extends View {
     this.input.on("focus", (_e, cx) => { this.inputFocused = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.inputFocused = false; cx.notify(); });
     cx.spawn(async (cx) => {
-      try { await this.load(); } catch (e) { this.error = String(e); }
+      try { await this.load(); } catch (e) { this.error = String(e).replace(/^Error: /, ""); this.fatal = true; }
       this.ready = true;
       this.refreshInfo(cx);
       cx.notify();
@@ -84,6 +84,8 @@ export default class WorktreeGroup extends View {
       this.info.linked = top.ok && common.ok && common.out !== `${top.out}/.git`;
     }
     if (this.mode === "create") {
+      if (this.info.git) throw new Error("This folder is a git repository, not a folder that contains repositories.");
+      if (found) throw new Error("This Space is already a worktree group.");
       const settings = await readTextFile(join(appHome(), "settings.json")).catch(() => null);
       this.groupsRoot = join(worktreesDirFromSettings(settings, home()), "groups");
       const scan = await scanFolder(this.folder);
@@ -322,7 +324,7 @@ export default class WorktreeGroup extends View {
     const edit = this.mode === "edit";
     const plan = edit && this.ready ? this.plan() : { add: [], remove: [] };
     const review = edit && this.stage === "review";
-    const valid = !this.busy && this.ready && !this.error.startsWith("That space") &&
+    const valid = !this.busy && this.ready && !this.fatal &&
       (create ? this.canCreate() : this.mode === "sync" ? this.list.length > 0 : destroy ? true : plan.add.length + plan.remove.length > 0);
     const confirmLabel = this.busy ? "Working…" : { create: "Create", edit: review ? "Confirm and apply" : "Review changes…", sync: "Sync and overwrite", destroy: "Delete group" }[this.mode];
     const sub = create ? this.folder : this.pw?.dir;

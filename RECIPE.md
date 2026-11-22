@@ -8,7 +8,7 @@ with a git worktree of each chosen repo on one shared branch, plus the agent fil
 
 ## What you see
 
-The Space right-click menu (a popup, 200px wide, Herdr's popover colors, 31px rows, 14px muted icons) with
+The Space right-click menu (a popup, 270px wide, Herdr's popover colors, 31px rows, 14px muted icons) with
 the stock items (Rename, New/Open/Remove worktree for git spaces, Close) plus:
 
 - on a folder that is not a git repo: **Create worktree group from folder**;
@@ -52,9 +52,12 @@ folder path in dim 11px text under the title):
 - `mods/worktree-group/` (`mod.json` `{ "place": "none" }`): `lib.js` has all logic with injected `exec` /
   `readTextFile` / `writeTextFile` and no `herdr` imports (unit tested); `main.js` is one `View` with modes
   `menu | create | edit | sync | destroy`, opened with `openOverlay({ mod: "worktree-group", kind: "popup" | "dialog", props })`.
+- `mods/tabs-wg/` and `mods/new-menu-wg/`: clones of `tabs` and `new-menu`; the tab bar's **+** opens `new-menu-wg`,
+  which adds a **New worktree group…** row (opens `worktree-group` with `{ mode: "create", space, folder }`, the active
+  Space and focused pane folder; the popup is 270px wide and 543px tall).
 - `mods/spaces-wg/`: a clone of Herdr's `spaces` sidebar (`herdr-app do mod.clone '{"name":"spaces","as":"spaces-wg"}'`)
   where `menu(w)` opens `worktree-group` with `{ mode: "menu", tab: "space", target: { id } }` instead of `menu`.
-- `layouts/main-wg.json`: a clone of the `main` layout (`layout.clone`) whose spaces block uses `spaces-wg`.
+- `layouts/main-wg.json`: a clone of the `main` layout (`layout.clone`) whose spaces block uses `spaces-wg` and whose tab bar block uses `tabs-wg`.
 - `herdr` functions: `exec`, `readTextFile`, `writeTextFile`, `spaces`, `panes`, `openOverlay`, `closeOverlay`, `props`,
   `run` (`space.new`, `space.close`, `space.rename`), `notify`, `theme`, `appHome`, `home`. `gpui-base` `InputState`/`Input`.
 - Programs run: `git`, `find`, `test`, `cp`, `mkdir`, `rm`, `rmdir`. Everything passes argument arrays, never a shell.

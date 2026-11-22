@@ -15,9 +15,14 @@ one Space with a git worktree of each chosen repo on a shared branch, plus the a
   .herdr-worktree-group.json
 ```
 
+![Create worktree group dialog](preview.png)
+
 ## Using it
 
-Right-click a Space in the sidebar.
+Right-click a Space in the sidebar, or use the **+** button in the tab bar (**New worktree group…**, for the
+active Space's folder).
+
+![Space menu](preview_menu.png)
 
 - **Create worktree group from folder** (on a folder that is not a git repo): type a name (it is also
   the branch name), tick the repos (none are ticked by default) and the files to copy (agent files
@@ -40,16 +45,21 @@ shell, so paths with spaces are safe.
 herdr-app do layout.switch '{"name":"main-wg"}'
 ```
 
-This copies `worktree-group` (the mod) and `spaces-wg` (below) into `~/.config/herdr-app/mods`, checks
+This copies `worktree-group` (the mod) and `spaces-wg`, `tabs-wg`, `new-menu-wg` (below) into `~/.config/herdr-app/mods`, checks
 them with `herdr-app check`, and with `--layout` adds the `main-wg` layout. Press `ctrl-alt-shift-escape`
 in Herdr to fall back to the default layout if anything misbehaves.
 
-### Why a cloned sidebar?
+### Why cloned mods?
 
-Herdr's shipped mods and layouts are read-only and the Space right-click opens the shipped `menu` mod.
-`spaces-wg` is Herdr's `spaces` sidebar (v0.1.16) with one change: right-click opens `worktree-group`
-instead of `menu`, whose standard items are reproduced there. `layouts/main-wg.json` is Herdr's `main`
-layout pointing at `spaces-wg`. If your layout is your own clone, change its sidebar block's `mod` to
+Herdr's shipped mods and layouts are read-only, and the Space right-click and the tab bar's **+** open
+shipped mods. So three small clones, each with one change (Herdr v0.1.16):
+
+- `spaces-wg`: Herdr's `spaces` sidebar; right-click opens `worktree-group` instead of `menu` (whose standard
+  items are reproduced there).
+- `tabs-wg`: the `tabs` bar; **+** opens `new-menu-wg`.
+- `new-menu-wg`: the `new-menu` popup with an extra **New worktree group…** row.
+
+`layouts/main-wg.json` is Herdr's `main` layout pointing at `spaces-wg` and `tabs-wg`. If your layout is your own clone, change its sidebar block's `mod` to
 `spaces-wg`, or make the same one-line change in your sidebar clone (`mod: "worktree-group"`,
 `props: { mode: "menu", tab: "space", target: { id } }`).
 

@@ -3,8 +3,8 @@
 set -e
 H="${HERDR_APP_HOME:-$HOME/.config/herdr-app}"
 D="$(cd "$(dirname "$0")" && pwd)"
-for m in worktree-group spaces-wg; do
-  mkdir -p "$H/mods/$m"; cp "$D/mods/$m/"*.js "$D/mods/$m/mod.json" "$H/mods/$m/"
+for m in worktree-group spaces-wg tabs-wg new-menu-wg; do
+  mkdir -p "$H/mods/$m"; cp "$D/mods/$m/"* "$H/mods/$m/"
   herdr-app check "$H/mods/$m"
 done
 [ "$1" = "--layout" ] && cp "$D/layouts/main-wg.json" "$H/layouts/"
