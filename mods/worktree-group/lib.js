@@ -1,0 +1,311 @@
+// The logic of the worktree-group mod, with no UI and no `herdr` imports, so it can be
+// unit tested in Node. main.js passes Herdr's real exec/readTextFile/writeTextFile;
+// the tests pass child_process / fs versions.
+//
+//   exec(command, args, {cwd?}) -> Promise<{code, stdout, stderr}>
+//   readTextFile(path)          -> Promise<string | null>
+//   writeTextFile(path, text, expected) -> Promise<null>
+//
+// Every command runs with an argv array, never through a shell, so paths with spaces are safe.
+
+export const META = ".herdr-worktree-group.json";
+
+// Parent-level entries that are ticked by default in the Create dialog (agent setup).
+export const PRESELECT = ["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".skills", ".claude", ".cursor", ".agents", ".codex"];
+
+export const trimSlash = (p) => (p.length > 1 ? p.replace(/\/+$/, "") : p);
+export const base = (p) => trimSlash(p).split("/").pop();
+export const join = (...parts) => parts.map((p, i) => (i === 0 ? trimSlash(p) : p.replace(/^\/+|\/+$/g, ""))).join("/");
+
+// A branch name that is safe as a git ref, or "" when it is not usable.
+export function cleanBranch(text) {
+  const s = String(text ?? "").trim().replace(/\s+/g, "-");
+  if (!s || !/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(s)) return "";
+  if (s.includes("..") || s.includes("//") || /[\/.]$/.test(s) || s.endsWith(".lock") || s.includes("/.")) return "";
+  return s;
+}
+
+// Where Herdr keeps worktrees: settings.json `worktrees.directory` (default ~/.herdr/worktrees).
+// `~` expands to `home`. Groups live in <directory>/groups.
+export function worktreesDirFromSettings(text, home) {
+  let dir = "~/.herdr/worktrees";
+  try {
+    const d = JSON.parse(text ?? "{}")?.worktrees?.directory;
+    if (typeof d === "string" && d.trim()) dir = d.trim();
+  } catch {}
+  if (dir === "~") return trimSlash(home);
+  if (dir.startsWith("~/")) return join(home, dir.slice(2));
+  return trimSlash(dir);
+}
+
+// Short stable hash (FNV-1a) used only to tell apart two parent folders that share a name.
+export function shortHash(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(16).padStart(8, "0").slice(0, 6);
+}
+
+// What ticking and unticking repos means for a group. All arguments are lists of repo names.
+// -> { list, add, remove, missing }: `list` is every repo to show, `missing` are group repos that
+// no longer exist in the source folder.
+export function planRepoChanges({ sourceRepos, groupRepos, selected }) {
+  const sel = new Set(selected);
+  const inGroup = new Set(groupRepos);
+  const missing = groupRepos.filter((n) => !sourceRepos.includes(n));
+  const list = [...new Set([...sourceRepos, ...groupRepos])].sort((a, b) => a.localeCompare(b));
+  return {
+    list,
+    missing,
+    add: list.filter((n) => sel.has(n) && !inGroup.has(n)),
+    remove: list.filter((n) => !sel.has(n) && inGroup.has(n)),
+  };
+}
+
+export function createLib({ exec, readTextFile, writeTextFile }) {
+  async function git(cwd, args) {
+    try {
+      const r = await exec("git", ["-C", cwd, ...args]);
+      return { ok: r.code === 0, out: r.stdout.trim(), err: (r.stderr || r.stdout).trim() };
+    } catch (e) {
+      return { ok: false, out: "", err: String(e) };
+    }
+  }
+
+  async function exists(path) {
+    try { return (await exec("test", ["-e", path])).code === 0; } catch { return false; }
+  }
+
+  const isGitRepo = async (folder) => (await git(folder, ["rev-parse", "--is-inside-work-tree"])).ok;
+
+  // One pass over a folder's direct children: real directories holding a .git are repos,
+  // everything else (files, other folders, symlinks, hidden entries) is a file/folder to share.
+  // -> { repos: [names], files: [{ name, preselected }] }, each sorted. Our metadata file is skipped.
+  async function scanFolder(folder) {
+    const all = await exec("find", [folder, "-mindepth", "1", "-maxdepth", "1"]);
+    if (all.code !== 0) return { repos: [], files: [] };
+    const dirs = await exec("find", [folder, "-mindepth", "1", "-maxdepth", "1", "-type", "d"]);
+    const dirSet = new Set(dirs.code === 0 ? dirs.stdout.split("\n").filter(Boolean).map(base) : []);
+    const repos = [];
+    const files = [];
+    for (const n of all.stdout.split("\n").filter(Boolean).map(base)) {
+      if (n === META) continue;
+      if (dirSet.has(n) && (await exists(join(folder, n, ".git")))) repos.push(n);
+      else files.push({ name: n, preselected: PRESELECT.includes(n) });
+    }
+    const by = (a, b) => (a.name ?? a).localeCompare(b.name ?? b);
+    return { repos: repos.sort(by), files: files.sort(by) };
+  }
+
+  const childRepos = async (folder) => (await scanFolder(folder)).repos;
+
+  // Copies one entry, overwriting what is there. A folder's contents are merged into the
+  // existing folder (cp -a src dst would nest it).
+  async function copyEntry(from, to) {
+    const isDir = (await exec("test", ["-d", from])).code === 0 && (await exec("test", ["-L", from])).code !== 0;
+    if (!isDir) return exec("cp", ["-a", "--", from, to]);
+    const mk = await exec("mkdir", ["-p", "--", to]);
+    if (mk.code !== 0) return mk;
+    return exec("cp", ["-a", "--", `${from}/.`, `${to}/`]);
+  }
+
+  async function copyAll(source, dest, names) {
+    const copied = [];
+    const failures = [];
+    for (const n of names) {
+      const c = await copyEntry(join(source, n), join(dest, n));
+      if (c.code === 0) copied.push(n); else failures.push(`${n}: ${c.stderr.trim()}`);
+    }
+    return { copied, failures };
+  }
+
+  // Walks up from `start` looking for the metadata file. -> { dir, meta } | null
+  async function findMeta(start) {
+    let dir = start && trimSlash(start);
+    for (let i = 0; dir && dir !== "/" && i < 8; i++) {
+      const txt = await readTextFile(join(dir, META)).catch(() => null);
+      if (txt) {
+        try {
+          const meta = JSON.parse(txt);
+          if (meta && typeof meta.sourceParentPath === "string" && typeof meta.branchName === "string" && Array.isArray(meta.repos)) return { dir, meta };
+        } catch {}
+      }
+      dir = dir.slice(0, dir.lastIndexOf("/")) || "/";
+    }
+    return null;
+  }
+
+  async function writeMeta(dir, meta) {
+    const path = join(dir, META);
+    const prev = await readTextFile(path).catch(() => null);
+    await writeTextFile(path, JSON.stringify(meta, null, 2) + "\n", prev);
+  }
+
+  // The state of `branch` in one repo, so the UI can warn before anything runs.
+  //  new:      does not exist; would be created from the repo's current HEAD (`base`)
+  //  existing: local branch, not checked out anywhere; would be checked out
+  //  remote:   only on a remote (`remote`, e.g. origin/feat); would be created tracking it
+  //  in-use:   checked out in another worktree (`usedAt`); git refuses
+  async function inspectBranch(repoPath, branch) {
+    const list = await git(repoPath, ["worktree", "list", "--porcelain"]);
+    let usedAt = null;
+    if (list.ok) {
+      for (const block of list.out.split("\n\n")) {
+        const lines = block.split("\n");
+        if (lines.some((l) => l.startsWith("prunable"))) continue; // stale record: pruned before adding
+        if (lines.includes(`branch refs/heads/${branch}`)) usedAt = (lines.find((l) => l.startsWith("worktree ")) ?? "").slice(9);
+      }
+    }
+    if (usedAt) return { state: "in-use", usedAt };
+    if ((await git(repoPath, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])).ok) return { state: "existing" };
+    const refs = await git(repoPath, ["for-each-ref", "--format=%(refname:short)", "refs/remotes"]);
+    const remote = refs.ok ? refs.out.split("\n").find((r) => r.endsWith(`/${branch}`) && !r.endsWith("/HEAD")) : null;
+    if (remote) return { state: "remote", remote };
+    const head = await git(repoPath, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    return { state: "new", base: head.ok ? head.out : "HEAD" };
+  }
+
+  // -> { repo: info } for each repo.
+  async function inspectRepos(source, repos, branch) {
+    const out = {};
+    for (const repo of repos) out[repo] = await inspectBranch(join(source, repo), branch);
+    return out;
+  }
+
+  // git worktree add: checks out an existing branch, tracks a remote one, or creates a new one.
+  async function addWorktree(repoPath, branch, target) {
+    await git(repoPath, ["worktree", "prune"]); // forget records of worktrees whose folder is gone
+    const info = await inspectBranch(repoPath, branch);
+    if (info.state === "in-use") return { ok: false, out: "", err: `Branch ${branch} is already checked out at ${info.usedAt}`, created: false };
+    let r;
+    if (info.state === "existing") r = await git(repoPath, ["worktree", "add", target, branch]);
+    else if (info.state === "remote") r = await git(repoPath, ["worktree", "add", "--track", "-b", branch, target, info.remote]);
+    else r = await git(repoPath, ["worktree", "add", "-b", branch, target]);
+    return { ...r, created: info.state === "new" || info.state === "remote", state: info.state };
+  }
+
+  // <groupsRoot>/<parent folder name>/, or <name>-<hash> when another parent folder with the same
+  // name already has groups there.
+  async function parentDirFor(groupsRoot, source) {
+    const plain = join(groupsRoot, base(source));
+    const kids = await exec("find", [plain, "-mindepth", "1", "-maxdepth", "1", "-type", "d"]);
+    if (kids.code !== 0) return plain;
+    for (const kid of kids.stdout.split("\n").filter(Boolean)) {
+      const txt = await readTextFile(join(kid, META)).catch(() => null);
+      if (!txt) continue;
+      try { if (JSON.parse(txt).sourceParentPath !== trimSlash(source)) return `${plain}-${shortHash(trimSlash(source))}`; } catch {}
+    }
+    return plain;
+  }
+
+  // Where a group with this branch name will be created, and whether that folder is taken.
+  async function groupTarget({ groupsRoot, source, branch }) {
+    const target = join(await parentDirFor(groupsRoot, trimSlash(source)), branch.replace(/\//g, "-"));
+    return { target, taken: await exists(target) };
+  }
+
+  // ----- flows: they return what happened; the UI shows toasts -----
+
+  // `repos` may be empty (a group with only shared files is valid); `files` are the parent-level
+  // entries to copy. -> { target, repos, copied, copyFailures }. Throws (after undoing) when a worktree fails.
+  async function createWorktreeGroup({ source, branch, repos = [], files = [], groupsRoot }) {
+    source = trimSlash(source);
+    const { target, taken } = await groupTarget({ groupsRoot, source, branch });
+    if (taken) throw new Error(`${target} already exists. Pick another name.`);
+    const mk = await exec("mkdir", ["-p", target]);
+    if (mk.code !== 0) throw new Error(`Could not create ${target}: ${mk.stderr.trim()}`);
+    const made = [];
+    for (const repo of repos) {
+      const r = await addWorktree(join(source, repo), branch, join(target, repo));
+      if (!r.ok) {
+        // Undo this run so nothing half-made is left behind.
+        for (const m of made) {
+          await git(join(source, m.repo), ["worktree", "remove", "--force", join(target, m.repo)]);
+          if (m.created) await git(join(source, m.repo), ["branch", "-D", branch]);
+        }
+        await exec("rmdir", [target]);
+        throw new Error(`${repo}: ${r.err}`);
+      }
+      made.push({ repo, created: r.created });
+    }
+    const { copied, failures } = await copyAll(source, target, files);
+    const names = made.map((m) => m.repo);
+    await writeMeta(target, { version: 1, sourceParentPath: source, branchName: branch, repos: names, copied });
+    return { target, repos: names, copied, copyFailures: failures };
+  }
+
+  // -> { added, failures }
+  async function appendWorktrees({ dir, meta, repos }) {
+    const added = [];
+    const failures = [];
+    for (const repo of repos) {
+      const r = await addWorktree(join(meta.sourceParentPath, repo), meta.branchName, join(dir, repo));
+      if (r.ok) added.push(repo); else failures.push(`${repo}: ${r.err}`);
+    }
+    if (added.length) await writeMeta(dir, { ...meta, repos: [...meta.repos, ...added] });
+    return { added, failures };
+  }
+
+  // -> { removed, failures }
+  async function removeWorktrees({ dir, meta, repos, force }) {
+    const removed = [];
+    const failures = [];
+    for (const repo of repos) {
+      const r = await git(join(meta.sourceParentPath, repo), ["worktree", "remove", ...(force ? ["--force"] : []), join(dir, repo)]);
+      if (r.ok) removed.push(repo); else failures.push(`${repo}: ${r.err}`);
+    }
+    if (removed.length) await writeMeta(dir, { ...meta, repos: meta.repos.filter((n) => !removed.includes(n)) });
+    return { removed, failures };
+  }
+
+  // Removes `remove` first, then adds `add`. -> { added, removed, failures }
+  async function applyRepoChanges({ dir, meta, add = [], remove = [], force = false }) {
+    let removed = [];
+    let added = [];
+    const failures = [];
+    let current = meta;
+    if (remove.length) {
+      const r = await removeWorktrees({ dir, meta, repos: remove, force });
+      removed = r.removed;
+      failures.push(...r.failures);
+      current = { ...meta, repos: meta.repos.filter((n) => !removed.includes(n)) };
+    }
+    if (add.length) {
+      const r = await appendWorktrees({ dir, meta: current, repos: add });
+      added = r.added;
+      failures.push(...r.failures);
+    }
+    return { added, removed, failures };
+  }
+
+  // Copies the group's stored file selection (meta.copied) from the source again, overwriting.
+  // Entries that no longer exist in the source are reported as failures and left alone.
+  async function syncGroupFiles({ dir, meta }) {
+    const { copied, failures } = await copyAll(meta.sourceParentPath, dir, meta.copied ?? []);
+    return { copied, failures };
+  }
+
+  // Removes every child worktree, the copied files, the metadata and the (empty) folder.
+  // -> { ok, failures, folderKept }. On failure nothing but the removed worktrees is touched.
+  async function destroyWorktreeGroup({ dir, meta, force }) {
+    const failures = [];
+    const removed = [];
+    for (const repo of meta.repos) {
+      const target = join(dir, repo);
+      if (!(await exists(target))) { removed.push(repo); continue; } // already gone: prune below
+      const r = await git(join(meta.sourceParentPath, repo), ["worktree", "remove", ...(force ? ["--force"] : []), target]);
+      if (r.ok) removed.push(repo); else failures.push(`${repo}: ${r.err}`);
+    }
+    for (const repo of removed) await git(join(meta.sourceParentPath, repo), ["worktree", "prune"]);
+    if (failures.length) {
+      await writeMeta(dir, { ...meta, repos: meta.repos.filter((n) => !removed.includes(n)) });
+      return { ok: false, failures, folderKept: true };
+    }
+    for (const n of meta.copied ?? []) await exec("rm", ["-rf", "--", join(dir, n)]);
+    await exec("rm", ["-f", join(dir, META)]);
+    const rm = await exec("rmdir", [dir]); // only succeeds when empty
+    return { ok: true, failures: [], folderKept: rm.code !== 0 };
+  }
+
+  return { git, exists, isGitRepo, scanFolder, childRepos, copyEntry, findMeta, writeMeta, addWorktree, inspectBranch, inspectRepos, groupTarget,
+    createWorktreeGroup, appendWorktrees, removeWorktrees, applyRepoChanges, syncGroupFiles, destroyWorktreeGroup };
+}
