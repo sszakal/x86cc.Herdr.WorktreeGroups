@@ -14,6 +14,7 @@ export const META = ".herdr-worktree-group.json";
 export const PRESELECT = ["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".skills", ".claude", ".cursor", ".agents", ".codex"];
 
 export const trimSlash = (p) => (p.length > 1 ? p.replace(/\/+$/, "") : p);
+export const dirname = (p) => trimSlash(p).slice(0, trimSlash(p).lastIndexOf("/")) || "/";
 export const base = (p) => trimSlash(p).split("/").pop();
 export const join = (...parts) => parts.map((p, i) => (i === 0 ? trimSlash(p) : p.replace(/^\/+|\/+$/g, ""))).join("/");
 
@@ -306,6 +307,110 @@ export function createLib({ exec, readTextFile, writeTextFile }) {
     return { ok: true, failures: [], folderKept: rm.code !== 0 };
   }
 
+  // ----- archive: move a group instead of deleting it -----
+
+  // Moves a whole group folder. Each repo worktree goes with `git worktree move`; when git refuses
+  // (submodules, locked worktrees) it is moved with mv and re-registered with `git worktree repair`.
+  // Everything else in the folder (copied files, metadata) is moved with mv. On failure all is moved back.
+  async function moveGroup({ from, to, meta }) {
+    from = trimSlash(from);
+    to = trimSlash(to);
+    if (await exists(to)) throw new Error(`${to} already exists.`);
+    const mk = await exec("mkdir", ["-p", "--", to]);
+    if (mk.code !== 0) throw new Error(`Could not create ${to}: ${mk.stderr.trim()}`);
+    const done = [];
+    try {
+      for (const repo of meta.repos) {
+        const src = join(from, repo);
+        const dst = join(to, repo);
+        if (!(await exists(src))) continue; // already gone; nothing to move
+        const source = join(meta.sourceParentPath, repo);
+        const r = await git(source, ["worktree", "move", src, dst]);
+        if (r.ok) { done.push(repo); continue; }
+        const mv = await exec("mv", ["--", src, dst]);
+        if (mv.code !== 0) throw new Error(`${repo}: ${r.err || mv.stderr.trim()}`);
+        done.push(repo);
+        const rp = await git(source, ["worktree", "repair", dst]);
+        if (!rp.ok) throw new Error(`${repo}: ${rp.err}`);
+      }
+      const list = await exec("find", [from, "-mindepth", "1", "-maxdepth", "1"]);
+      for (const n of list.stdout.split("\n").filter(Boolean).map(base)) {
+        const mv = await exec("mv", ["--", join(from, n), join(to, n)]);
+        if (mv.code !== 0) throw new Error(`${n}: ${mv.stderr.trim()}`);
+      }
+      await exec("rmdir", [from]); // best effort: only succeeds when empty
+    } catch (e) {
+      for (const repo of [...done].reverse()) {
+        await exec("mv", ["--", join(to, repo), join(from, repo)]);
+        await git(join(meta.sourceParentPath, repo), ["worktree", "repair", join(from, repo)]);
+      }
+      const back = await exec("find", [to, "-mindepth", "1", "-maxdepth", "1"]);
+      for (const n of back.stdout.split("\n").filter(Boolean).map(base)) await exec("mv", ["--", join(to, n), join(from, n)]);
+      await exec("rmdir", [to]);
+      throw e;
+    }
+  }
+
+  // <groupsRoot>/.archive/<parent folder name>/<group>, with -2, -3... when that name is taken.
+  async function archivePath({ dir, meta, groupsRoot }) {
+    const parent = trimSlash(dir).startsWith(`${trimSlash(groupsRoot)}/`) ? base(dirname(dir)) : base(meta.sourceParentPath);
+    const name = base(dir);
+    let candidate = join(groupsRoot, ".archive", parent, name);
+    for (let i = 2; await exists(candidate); i++) candidate = join(groupsRoot, ".archive", parent, `${name}-${i}`);
+    return candidate;
+  }
+
+  // Moves the group into the archive folder, keeping uncommitted work, copied files and branches.
+  // -> { target }. Nothing is deleted.
+  async function archiveWorktreeGroup({ dir, meta, groupsRoot, now = new Date() }) {
+    const target = await archivePath({ dir, meta, groupsRoot });
+    const mk = await exec("mkdir", ["-p", "--", dirname(target)]);
+    if (mk.code !== 0) throw new Error(`Could not create ${dirname(target)}: ${mk.stderr.trim()}`);
+    await moveGroup({ from: dir, to: target, meta });
+    await writeMeta(target, { ...meta, archived: true, archivedAt: now.toISOString(), archivedFrom: trimSlash(dir) });
+    await exec("rmdir", [dirname(dir)]); // the parent's folder, when it is now empty
+    return { target };
+  }
+
+  // Moves an archived group back to where it came from. -> { target }
+  async function restoreWorktreeGroup({ dir, meta }) {
+    const origin = meta.archivedFrom;
+    if (!origin) throw new Error("This archive has no record of where it came from.");
+    if (await exists(origin)) throw new Error(`${origin} already exists. Rename or remove it first.`);
+    const mk = await exec("mkdir", ["-p", "--", dirname(origin)]);
+    if (mk.code !== 0) throw new Error(`Could not create ${dirname(origin)}: ${mk.stderr.trim()}`);
+    await moveGroup({ from: dir, to: origin, meta });
+    const { archived, archivedAt, archivedFrom, ...rest } = meta;
+    await writeMeta(origin, rest);
+    await exec("rmdir", [dirname(dir)]);
+    return { target: origin };
+  }
+
+  // The archived groups under <groupsRoot>/.archive, newest first. -> [{ dir, meta }]
+  async function listArchivedGroups(groupsRoot) {
+    const r = await exec("find", [join(groupsRoot, ".archive"), "-mindepth", "2", "-maxdepth", "2", "-type", "d"]);
+    if (r.code !== 0) return [];
+    const out = [];
+    for (const dir of r.stdout.split("\n").filter(Boolean)) {
+      const found = await findMeta(dir);
+      if (found && found.dir === dir && found.meta.archived) out.push(found);
+    }
+    return out.sort((a, b) => String(b.meta.archivedAt).localeCompare(String(a.meta.archivedAt)));
+  }
+
+  // The repos of a group that have uncommitted changes. -> [names]
+  async function dirtyRepos({ dir, meta }) {
+    const dirty = [];
+    for (const repo of meta.repos) {
+      const path = join(dir, repo);
+      if (!(await exists(path))) continue;
+      const st = await git(path, ["--no-optional-locks", "status", "--porcelain"]);
+      if (st.ok && st.out) dirty.push(repo);
+    }
+    return dirty;
+  }
+
   return { git, exists, isGitRepo, scanFolder, childRepos, copyEntry, findMeta, writeMeta, addWorktree, inspectBranch, inspectRepos, groupTarget,
-    createWorktreeGroup, appendWorktrees, removeWorktrees, applyRepoChanges, syncGroupFiles, destroyWorktreeGroup };
+    createWorktreeGroup, appendWorktrees, removeWorktrees, applyRepoChanges, syncGroupFiles, destroyWorktreeGroup,
+    archiveWorktreeGroup, restoreWorktreeGroup, listArchivedGroups, dirtyRepos };
 }

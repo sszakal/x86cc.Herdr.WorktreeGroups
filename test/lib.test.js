@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createLib, cleanBranch, planRepoChanges, worktreesDirFromSettings, shortHash, join, base, META, PRESELECT } from "../mods/worktree-group/lib.js";
+import { createLib, cleanBranch, planRepoChanges, worktreesDirFromSettings, shortHash, join, base, dirname, META, PRESELECT } from "../mods/worktree-group/lib.js";
 
 const pexec = promisify(execFile);
 
@@ -426,5 +426,136 @@ describe("branch inspection", () => {
     meta = (await lib.findMeta(r.target)).meta;
     await lib.appendWorktrees({ dir: r.target, meta, repos: ["a"] });
     assert.equal(await git(join(r.target, "a"), "log", "-1", "--format=%s"), "work");
+  });
+});
+
+describe("archive", () => {
+  const archiveRoot = (parent) => root(parent);
+  async function groupWithWork() {
+    const parent = await makeParent(["a", "b"]);
+    const r = await lib.createWorktreeGroup({ groupsRoot: root(parent), source: parent, branch: "feat", repos: ["a", "b"], files: ["AGENTS.md", ".claude"] });
+    await fs.writeFile(join(r.target, "a", "uncommitted.txt"), "precious");
+    await git(join(r.target, "b"), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "committed work");
+    const { meta } = await lib.findMeta(r.target);
+    return { parent, dir: r.target, meta };
+  }
+  const worktreePaths = async (repo) => (await git(repo, "worktree", "list", "--porcelain")).split("\n").filter((l) => l.startsWith("worktree ")).map((l) => l.slice(9));
+
+  test("archive moves everything, keeps uncommitted work and git links valid, deletes nothing", async () => {
+    const { parent, dir, meta } = await groupWithWork();
+    const { target } = await lib.archiveWorktreeGroup({ dir, meta, groupsRoot: root(parent), now: new Date("2026-01-02T03:04:05Z") });
+    assert.equal(target, `${root(parent)}/.archive/UMG project/feat`);
+    assert.equal(await exists(dir), false, "original folder is gone");
+    assert.equal(await fs.readFile(join(target, "a", "uncommitted.txt"), "utf8"), "precious");
+    assert.equal(await fs.readFile(join(target, "AGENTS.md"), "utf8"), "source agents\n");
+    assert.equal(await git(join(target, "b"), "log", "-1", "--format=%s"), "committed work");
+    assert.equal(await git(join(target, "a"), "branch", "--show-current"), "feat", "git works inside the moved worktree");
+    const real = await fs.realpath(join(target, "a"));
+    assert.ok((await Promise.all((await worktreePaths(join(parent, "a"))).map((p) => fs.realpath(p).catch(() => p)))).includes(real), "source repo points at the new path");
+    const m = (await lib.findMeta(target)).meta;
+    assert.deepEqual([m.archived, m.archivedAt, m.archivedFrom], [true, "2026-01-02T03:04:05.000Z", dir]);
+    assert.equal(await exists(dirname(dir)), false, "the empty parent folder was tidied away");
+  });
+
+  test("listArchivedGroups and dirtyRepos", async () => {
+    const { parent, dir, meta } = await groupWithWork();
+    await lib.archiveWorktreeGroup({ dir, meta, groupsRoot: root(parent), now: new Date("2026-01-01T00:00:00Z") });
+    const p2 = await makeParent(["a"]);
+    const g2 = await lib.createWorktreeGroup({ groupsRoot: root(parent), source: p2, branch: "newer", repos: ["a"] });
+    await lib.archiveWorktreeGroup({ dir: g2.target, meta: (await lib.findMeta(g2.target)).meta, groupsRoot: root(parent), now: new Date("2026-02-01T00:00:00Z") });
+    const list = await lib.listArchivedGroups(root(parent));
+    assert.deepEqual(list.map((x) => x.meta.branchName), ["newer", "feat"], "newest first");
+    const feat = list[1];
+    assert.deepEqual(await lib.dirtyRepos(feat), ["a"], "only a has uncommitted changes");
+    assert.deepEqual(await lib.listArchivedGroups(join(tmp, "nothing-here")), []);
+  });
+
+  test("restore puts everything back where it was", async () => {
+    const { parent, dir, meta } = await groupWithWork();
+    const { target } = await lib.archiveWorktreeGroup({ dir, meta, groupsRoot: root(parent) });
+    const archived = (await lib.findMeta(target));
+    const r = await lib.restoreWorktreeGroup(archived);
+    assert.equal(r.target, dir);
+    assert.equal(await exists(target), false);
+    assert.equal(await fs.readFile(join(dir, "a", "uncommitted.txt"), "utf8"), "precious");
+    assert.equal(await git(join(dir, "a"), "branch", "--show-current"), "feat");
+    const m = (await lib.findMeta(dir)).meta;
+    assert.equal(m.archived, undefined);
+    assert.equal(m.archivedFrom, undefined);
+    assert.deepEqual(m.repos, ["a", "b"]);
+  });
+
+  test("restore refuses when the original folder is taken, and leaves the archive intact", async () => {
+    const { parent, dir, meta } = await groupWithWork();
+    const { target } = await lib.archiveWorktreeGroup({ dir, meta, groupsRoot: root(parent) });
+    await fs.mkdir(dir, { recursive: true });
+    await assert.rejects(lib.restoreWorktreeGroup(await lib.findMeta(target)), /already exists/);
+    assert.equal(await fs.readFile(join(target, "a", "uncommitted.txt"), "utf8"), "precious");
+  });
+
+  test("archiving the same group name twice does not collide", async () => {
+    const parent = await makeParent(["a"]);
+    const make = () => lib.createWorktreeGroup({ groupsRoot: root(parent), source: parent, branch: "again", repos: [] });
+    const g1 = await make();
+    const a1 = await lib.archiveWorktreeGroup({ dir: g1.target, meta: (await lib.findMeta(g1.target)).meta, groupsRoot: root(parent) });
+    const g2 = await make();
+    const a2 = await lib.archiveWorktreeGroup({ dir: g2.target, meta: (await lib.findMeta(g2.target)).meta, groupsRoot: root(parent) });
+    assert.equal(a1.target, `${root(parent)}/.archive/UMG project/again`);
+    assert.equal(a2.target, `${root(parent)}/.archive/UMG project/again-2`);
+  });
+
+  test("a group made outside the groups root (older sibling layout) is archived under the parent's name", async () => {
+    const parent = await makeParent(["a"]);
+    const old = `${parent}-worktrees/legacy`;
+    const created = await lib.createWorktreeGroup({ groupsRoot: `${parent}-worktrees-tmp`, source: parent, branch: "legacy", repos: ["a"] });
+    await fs.mkdir(dirname(old), { recursive: true });
+    const meta = (await lib.findMeta(created.target)).meta;
+    await lib.archiveWorktreeGroup({ dir: created.target, meta, groupsRoot: root(parent) }).then((r) => {
+      assert.equal(r.target, `${root(parent)}/.archive/UMG project/legacy`);
+    });
+  });
+
+  test("a worktree with an initialised submodule (git refuses to move it) is still archived via the fallback", async () => {
+    const parent = await makeParent(["a"]);
+    const sub = join(tmp, `subrepo-${n}`);
+    await fs.mkdir(sub);
+    await git(sub, "init", "-q", "-b", "main");
+    await git(sub, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "sub");
+    const allow = ["-c", "protocol.file.allow=always", "-c", "user.name=t", "-c", "user.email=t@t"];
+    await git(join(parent, "a"), ...allow, "submodule", "add", "-q", sub, "vendor");
+    await git(join(parent, "a"), ...allow, "commit", "-q", "-m", "add submodule");
+    const r = await lib.createWorktreeGroup({ groupsRoot: root(parent), source: parent, branch: "withsub", repos: ["a"] });
+    await git(join(r.target, "a"), ...allow, "submodule", "update", "--init", "-q");
+    const { meta } = await lib.findMeta(r.target);
+    const { target } = await lib.archiveWorktreeGroup({ dir: r.target, meta, groupsRoot: root(parent) });
+    assert.equal(await git(join(target, "a"), "branch", "--show-current"), "withsub");
+    assert.equal(await exists(join(target, "a", "vendor", ".git")), true);
+    assert.equal(await exists(r.target), false);
+    const real = await fs.realpath(join(target, "a"));
+    assert.ok((await Promise.all((await worktreePaths(join(parent, "a"))).map((p) => fs.realpath(p).catch(() => p)))).includes(real));
+  });
+
+  test("a failure part way moves everything back", async () => {
+    const { parent, dir, meta } = await groupWithWork();
+    await fs.rm(join(parent, "b"), { recursive: true, force: true }); // b's source repo is gone: its worktree cannot be moved
+    await assert.rejects(lib.archiveWorktreeGroup({ dir, meta, groupsRoot: root(parent) }));
+    assert.equal(await exists(join(dir, "a", "uncommitted.txt")), true, "a is back in the group");
+    assert.equal(await exists(join(dir, "AGENTS.md")), true);
+    assert.equal(await exists(join(dir, META)), true);
+    assert.equal(await exists(`${root(parent)}/.archive/UMG project/feat`), false, "no half-made archive");
+  });
+
+  test("an archived group can be deleted permanently", async () => {
+    const { parent, dir, meta } = await groupWithWork();
+    const { target } = await lib.archiveWorktreeGroup({ dir, meta, groupsRoot: root(parent) });
+    const archived = await lib.findMeta(target);
+    let r = await lib.destroyWorktreeGroup({ dir: archived.dir, meta: archived.meta, force: false });
+    assert.equal(r.ok, false, "a has uncommitted work, so a plain delete is refused");
+    assert.equal(await exists(join(target, "a", "uncommitted.txt")), true);
+    const again = await lib.findMeta(target);
+    r = await lib.destroyWorktreeGroup({ dir: again.dir, meta: again.meta, force: true });
+    assert.equal(r.ok, true);
+    assert.equal(await exists(target), false);
+    assert.equal((await worktreePaths(join(parent, "a"))).length, 1);
   });
 });
