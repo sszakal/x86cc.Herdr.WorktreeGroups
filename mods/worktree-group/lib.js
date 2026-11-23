@@ -107,7 +107,7 @@ export function createLib({ exec, readTextFile, writeTextFile }) {
     for (const n of all.stdout.split("\n").filter(Boolean).map(base)) {
       if (n === META || n === HOOKS_DIR) continue;
       if (dirSet.has(n) && (await exists(join(folder, n, ".git")))) repos.push(n);
-      else files.push({ name: n, preselected: PRESELECT.includes(n) });
+      else if (!config.excludedFolders.includes(n)) files.push({ name: n, preselected: PRESELECT.includes(n) });
     }
     const by = (a, b) => (a.name ?? a).localeCompare(b.name ?? b);
     for (const path of config.repos) {

@@ -55,7 +55,8 @@ folder path in dim 11px text under the title):
 - Sync re-copies only the files chosen at creation, applying the saved folder exclusions; nothing is deleted.
 - Parent config supports `repos` (additional repo paths), `preselectedRepos` (initial repo selection), and
   `excludedFolders` (relative paths omitted from shared copies). Configured nested repos are excluded from
-  copies of their containing shared folder.
+  copies of their containing shared folder. Excluded top-level shared folders are hidden from the Create
+  checklist; configured repositories below them remain visible in the repo checklist.
 - Archive moves the group to `<groupsRoot>/.archive/<parent>/<group>` (`-2`, `-3` when taken): each repo with
   `git worktree move`, falling back to `mv` + `git worktree repair` when git refuses (submodules); everything else with
   `mv`; all moved back on failure. The metadata gets `archived`, `archivedAt`, `archivedFrom`; the Space closes.

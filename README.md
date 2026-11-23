@@ -26,9 +26,8 @@ active Space's folder).
 
 - **Create worktree group from folder** (on a folder that is not a git repo): type a name (it is also
   the branch name), tick the repos (none are ticked by default) and the files to copy (agent files
-  are ticked by default), and optionally list folders to exclude as comma-separated paths relative to
-  the parent folder (for example `.skills/cache, docs/drafts`). Exclusions apply inside copied folders
-  and are retained for later syncs. A group with no repos is valid. Each repo shows whether its branch is new,
+  are ticked by default). Repo defaults, additional nested repos, and excluded folders can be configured
+  in the parent folder as described below. A group with no repos is valid. Each repo shows whether its branch is new,
   existing, remote-only (will track it) or in use (blocked).
   Symlinks in the parent folder are followed: the group gets real copies, so editing them in the group never changes the
   originals. A symlink to a repo is listed as a file, and ticking it copies the whole repo.
@@ -47,8 +46,11 @@ Create `<parent>/.worktreegroup/config.json` to customize repo discovery and sha
 
 `repos` adds Git repositories at paths below the parent folder to the Create list; top-level repositories
 continue to be discovered automatically. `preselectedRepos` names which listed repositories start checked.
-`excludedFolders` paths are relative to the parent and apply to shared folders during creation and sync.
-Paths must be relative and cannot traverse above the parent. This file stays in the parent and is never copied.
+`excludedFolders` paths are relative to the parent. An excluded top-level shared folder is hidden from the
+Create checklist; a nested path is omitted while copying its containing shared folder. Exclusions also
+apply during sync. Configured repositories remain in the repo checklist even when their containing folder
+is excluded from shared-file copying. Paths must be relative and cannot traverse above the parent. This file
+stays in the parent and is never copied.
 
 - **Edit group repos**: tick to add, untick to remove. A review screen lists what will happen first.
 - **Sync shared files**: copies the files chosen at creation again, overwriting same-named ones and
