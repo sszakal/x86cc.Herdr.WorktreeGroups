@@ -1,0 +1,17 @@
+#!/bin/sh
+# Example worktree group hook: brings a repo's local (untracked) Serena config into its worktree.
+#   repo added|removing <worktree> <sourceRepo> <repo> <group> <branch>      (cwd: the worktree)
+# Committed .serena/ files are already in the worktree through git, so they are left alone.
+set -eu
+event=$1 worktree=$2 source_repo=$3
+
+[ "$event" = added ] || exit 0
+[ -f "$source_repo/.serena/project.yml" ] || exit 0
+[ -f "$worktree/.serena/project.yml" ] && exit 0
+
+mkdir -p "$worktree/.serena"
+cp -p "$source_repo/.serena/project.yml" "$worktree/.serena/"
+# A copy: what Serena learns in the group stays in the group. Use `ln -s` instead to share memories.
+[ -d "$source_repo/.serena/memories" ] && [ ! -e "$worktree/.serena/memories" ] && cp -Rp "$source_repo/.serena/memories" "$worktree/.serena/"
+# cache/ is never copied: Serena rebuilds its index for the worktree.
+exit 0

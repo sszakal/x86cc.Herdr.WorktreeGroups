@@ -22,6 +22,7 @@ function place(s) {
 }
 
 const toast = (title, body, level = "error") => notify({ title, body, level, timeout: level === "error" ? 12000 : 5000 });
+const hookToast = (failures) => { if (failures?.length) toast("A worktree group hook failed", failures.join("\n"), "warning"); };
 
 // ---------- the view ----------
 
@@ -231,6 +232,7 @@ export default class WorktreeGroup extends View {
     const branch = cleanBranch(this.name);
     const r = await lib.createWorktreeGroup({ groupsRoot: this.groupsRoot, source: this.folder, branch, repos: this.picked(), files: this.files.filter((f) => this.checkedFiles.has(f)) });
     if (r.copyFailures.length) toast("Some parent files were not copied", r.copyFailures.join("\n"), "warning");
+    hookToast(r.hookFailures);
     run("space.new", { name: `${base(trimSlash(this.folder))} · ${branch}`, folder: r.target, focus: true });
     toast("Worktree group created", r.repos.length ? `${r.repos.length} repo${r.repos.length === 1 ? "" : "s"} on ${branch}` : `No repos yet. Use “Add repos to group” (branch ${branch}).`, "success");
     return true;
@@ -243,6 +245,7 @@ export default class WorktreeGroup extends View {
   async edit() {
     const plan = this.plan();
     const r = await lib.applyRepoChanges({ ...this.pw, add: plan.add, remove: plan.remove, force: this.force });
+    hookToast(r.hookFailures);
     if (r.failures.length) {
       const dirty = !this.force && r.failures.some((f) => /modified|untracked|--force/.test(f));
       toast("Some changes could not be applied", r.failures.join("\n") + (dirty ? "\nUncommitted changes: tick “Force” to discard them." : ""));
@@ -253,7 +256,8 @@ export default class WorktreeGroup extends View {
   }
 
   async sync() {
-    const { copied, failures } = await lib.syncGroupFiles(this.pw);
+    const { copied, failures, hookFailures } = await lib.syncGroupFiles(this.pw);
+    hookToast(hookFailures);
     if (failures.length) toast("Some files were not synced", failures.join("\n"));
     if (copied.length) toast("Shared files synced", copied.join(", "), "success");
     return failures.length === 0;
@@ -342,6 +346,7 @@ export default class WorktreeGroup extends View {
     cx.spawn(async (cx) => {
       try {
         const r = await lib.destroyWorktreeGroup({ dir: item.dir, meta: item.meta, force: this.force });
+        hookToast(r.hookFailures);
         if (!r.ok) {
           this.needForce = true;
           this.error = r.failures.join("\n");

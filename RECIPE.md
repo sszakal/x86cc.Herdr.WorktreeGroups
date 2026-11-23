@@ -46,7 +46,8 @@ folder path in dim 11px text under the title):
   A group is recognised by this file, found by walking up from the Space's current folder (8 levels).
 - Create: `git -C <repo> worktree add [-b] <group>/<repo>`; existing branch: checked out; remote-only branch:
   `--track -b`; stale registrations are pruned first; if any repo fails everything is rolled back (worktrees,
-  new branches, folder). Chosen files are copied with `cp -a`; folders merge into existing folders.
+  new branches, folder). Chosen files are copied with symlinks followed (`cp -R -L -p`), so the group holds real files, never links back to the
+  source; folders merge into existing folders.
 - A group may have no repos. Removing every repo leaves an empty group. Edit removes first, then adds; a repo
   that fails does not stop the others; failures show an error toast with git's message, and a dirty worktree
   hints at Force.
@@ -57,6 +58,11 @@ folder path in dim 11px text under the title):
 - Restore moves it back to `archivedFrom` (refused if that folder exists) and opens a Space on it.
 - Delete permanently (archive screen only) removes the worktrees (`git worktree remove [--force]`), the copied files, the
   metadata and the folder (only if empty). If any worktree fails, nothing else is removed. Branches are never deleted.
+- Hooks: `<source>/.worktreegroup/hooks/repo` (`added|removing <worktree> <sourceRepo> <repo> <group> <branch>`, cwd
+  the worktree) runs after each repo is added (Create, after copying files; Edit) and before each removal (Edit, Delete
+  permanently); `group` (`changed <group> <source> <branch> <repo>...`, cwd the group) runs after Create, Edit and Sync. Run only
+  when present and executable; failures give one warning toast and are never rolled back. `.worktreegroup` is never listed as a
+  file to copy. Example (Serena per repo for Codex): `examples/worktreegroup/hooks/`.
 - Local Spaces only; remote spaces get no group items.
 
 ## Built from
@@ -72,7 +78,7 @@ folder path in dim 11px text under the title):
 - `layouts/main-wg.json`: a clone of the `main` layout (`layout.clone`) whose spaces block uses `spaces-wg` and whose tab bar block uses `tabs-wg`.
 - `herdr` functions: `exec`, `readTextFile`, `writeTextFile`, `spaces`, `panes`, `openOverlay`, `closeOverlay`, `props`,
   `run` (`space.new`, `space.close`, `space.rename`), `notify`, `theme`, `appHome`, `home`. `gpui-base` `InputState`/`Input`.
-- Programs run: `git`, `find`, `test`, `cp`, `mkdir`, `rm`, `rmdir`. Everything passes argument arrays, never a shell.
+- Programs run: `git`, `find`, `test`, `cp`, `mkdir`, `rm`, `rmdir`, and the user's hook scripts. Everything passes argument arrays, never a shell.
 - Reads `settings.json` (`worktrees.directory`); writes only inside groups and the source repos' git metadata.
 
 ## Watch out
@@ -80,8 +86,10 @@ folder path in dim 11px text under the title):
 - Shipped mods and layouts are read-only and replaced on start, so the sidebar must be a clone; keep `spaces-wg`
   and `main-wg` in sync with Herdr's versions when they change.
 - `herdr-app check` does not render dialogs or run async work: test the flows in the app and with `npm test`.
-- `cp -a src dst` onto an existing folder nests it; the mod copies folder contents (`src/.`) instead.
-- A symlink to a repo is a shared file, not a repo. Hidden entries are listed as files.
+- `cp -R src dst` onto an existing folder nests it; the mod copies folder contents (`src/.`) instead.
+- A symlink already at the destination (groups made before links were followed) would be written through into its target:
+  the mod removes such links (top level, and inside copied folders) before copying. A broken link is a copy failure.
+- A symlink to a repo is a shared file, not a repo (ticking it copies the whole repo, `.git` included). Hidden entries are listed as files.
 - `git worktree list --porcelain` blocks marked `prunable` must be ignored when checking if a branch is in use.
 - Linux and macOS tools only; Windows would need PowerShell equivalents.
 

@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createLib, cleanBranch, planRepoChanges, worktreesDirFromSettings, shortHash, join, base, dirname, META, PRESELECT } from "../mods/worktree-group/lib.js";
+import { createLib, cleanBranch, planRepoChanges, worktreesDirFromSettings, shortHash, join, base, dirname, META, PRESELECT, HOOKS_DIR } from "../mods/worktree-group/lib.js";
 
 const pexec = promisify(execFile);
 
@@ -575,3 +575,131 @@ describe("listing groups", () => {
   });
 });
 
+
+describe("hooks", () => {
+  // Writes <parent>/.worktreegroup/hooks/<name>: logs "<pwd>|<args joined by |>" to <parent>/hook.log.
+  async function hook(parent, name, body = "", mode = 0o755) {
+    const dir = join(parent, HOOKS_DIR, "hooks");
+    await fs.mkdir(dir, { recursive: true });
+    const log = join(parent, "hook.log");
+    const script = `#!/bin/sh\nIFS='|'\nprintf '%s|${name}|%s\\n' "$(pwd)" "$*" >> '${log}'\n${body}\n`;
+    await fs.writeFile(join(dir, name), script, { mode });
+  }
+  const lines = async (parent) => (await fs.readFile(join(parent, "hook.log"), "utf8").catch(() => "")).split("\n").filter(Boolean);
+
+  test("the hooks folder is not offered as a file to copy", async () => {
+    const parent = await makeParent(["a"]);
+    await hook(parent, "repo");
+    const { files } = await lib.scanFolder(parent);
+    assert.equal(files.some((f) => f.name === HOOKS_DIR), false);
+  });
+
+  test("create runs repo added per repo (cwd: worktree, after files are copied), then group changed", async () => {
+    const parent = await makeParent();
+    await hook(parent, "repo", `test -f "$5/AGENTS.md" || exit 3`);
+    await hook(parent, "group");
+    const r = await lib.createWorktreeGroup({ groupsRoot: root(parent), source: parent, branch: "h", repos: ["a", "b"], files: ["AGENTS.md"] });
+    assert.deepEqual(r.hookFailures, []);
+    const real = await fs.realpath(r.target);
+    assert.deepEqual(await lines(parent), [
+      `${real}/a|repo|added|${r.target}/a|${parent}/a|a|${r.target}|h`,
+      `${real}/b|repo|added|${r.target}/b|${parent}/b|b|${r.target}|h`,
+      `${real}|group|changed|${r.target}|${parent}|h|a|b`,
+    ]);
+  });
+
+  test("edit runs removing before removal, added after adding, then group changed with the new repos", async () => {
+    const parent = await makeParent();
+    const r = await lib.createWorktreeGroup({ groupsRoot: root(parent), source: parent, branch: "e", repos: ["a", "b"] });
+    await hook(parent, "repo", `[ "$1" = removing ] && { test -d "$2" || exit 4; }; true`);
+    await hook(parent, "group");
+    const { meta } = await lib.findMeta(r.target);
+    const x = await lib.applyRepoChanges({ dir: r.target, meta, add: ["c"], remove: ["a"] });
+    assert.deepEqual(x.hookFailures, []);
+    const real = await fs.realpath(r.target);
+    assert.deepEqual(await lines(parent), [
+      `${real}/a|repo|removing|${r.target}/a|${parent}/a|a|${r.target}|e`,
+      `${real}/c|repo|added|${r.target}/c|${parent}/c|c|${r.target}|e`,
+      `${real}|group|changed|${r.target}|${parent}|e|b|c`,
+    ]);
+  });
+
+  test("sync runs group changed; delete runs removing for each repo", async () => {
+    const parent = await makeParent(["a"]);
+    const r = await lib.createWorktreeGroup({ groupsRoot: root(parent), source: parent, branch: "s", repos: ["a"], files: ["AGENTS.md"] });
+    await hook(parent, "repo");
+    await hook(parent, "group");
+    let { meta } = await lib.findMeta(r.target);
+    assert.deepEqual((await lib.syncGroupFiles({ dir: r.target, meta })).hookFailures, []);
+    const d = await lib.destroyWorktreeGroup({ dir: r.target, meta, force: false });
+    assert.equal(d.ok, true);
+    assert.deepEqual((await lines(parent)).map((l) => l.split("|").slice(1, 3).join(" ")), ["group changed", "repo removing"]);
+  });
+
+  test("no hooks: nothing runs and nothing fails", async () => {
+    const parent = await makeParent(["a"]);
+    const r = await lib.createWorktreeGroup({ groupsRoot: root(parent), source: parent, branch: "n", repos: ["a"] });
+    assert.deepEqual(r.hookFailures, []);
+  });
+
+  test("a failing or non-executable hook is reported and nothing is rolled back", async () => {
+    const parent = await makeParent(["a"]);
+    await hook(parent, "repo", "echo boom >&2; exit 1");
+    await hook(parent, "group", "", 0o644);
+    const r = await lib.createWorktreeGroup({ groupsRoot: root(parent), source: parent, branch: "f", repos: ["a"] });
+    assert.equal(r.hookFailures.length, 2);
+    assert.match(r.hookFailures[0], /repo added a: boom/);
+    assert.match(r.hookFailures[1], /group changed: .*not executable/);
+    assert.equal(await git(join(r.target, "a"), "branch", "--show-current"), "f", "the group was still created");
+  });
+});
+
+describe("symlinks in the parent folder", () => {
+  // Real data lives outside the parent; the parent only has links to it.
+  async function linked() {
+    const parent = await makeParent(["a"]);
+    const elsewhere = join(dirname(parent), "shared data");
+    await fs.mkdir(join(elsewhere, "codex", "nested"), { recursive: true });
+    await fs.writeFile(join(elsewhere, "codex", "config.toml"), "model = \"o3\"\n");
+    await fs.writeFile(join(elsewhere, "codex", "nested", "deep.md"), "deep\n");
+    await fs.writeFile(join(elsewhere, "NOTES.md"), "notes\n");
+    await fs.symlink(join(elsewhere, "codex"), join(parent, ".codex"));
+    await fs.symlink(join(elsewhere, "NOTES.md"), join(parent, "NOTES.md"));
+    await fs.symlink(join(elsewhere, "NOTES.md"), join(parent, ".claude", "linked.md")); // a link inside a folder
+    return { parent, elsewhere };
+  }
+  const isLink = (p) => fs.lstat(p).then((s) => s.isSymbolicLink());
+
+  test("create copies the real files and folders, not the links", async () => {
+    const { parent } = await linked();
+    const r = await lib.createWorktreeGroup({ groupsRoot: root(parent), source: parent, branch: "l", repos: ["a"], files: [".codex", "NOTES.md", ".claude"] });
+    assert.deepEqual(r.copyFailures, []);
+    for (const p of [".codex", "NOTES.md", ".claude/linked.md"]) assert.equal(await isLink(join(r.target, p)), false, `${p} is a real copy`);
+    assert.equal(await fs.readFile(join(r.target, ".codex", "nested", "deep.md"), "utf8"), "deep\n");
+    assert.equal(await fs.readFile(join(r.target, ".claude", "linked.md"), "utf8"), "notes\n");
+  });
+
+  test("sync replaces links left by older groups and never writes through them", async () => {
+    const { parent, elsewhere } = await linked();
+    const r = await lib.createWorktreeGroup({ groupsRoot: root(parent), source: parent, branch: "old", repos: [], files: [] });
+    // What an older version left behind: links in the group pointing at the shared data.
+    await fs.symlink(join(elsewhere, "codex"), join(r.target, ".codex"));
+    await fs.symlink(join(elsewhere, "NOTES.md"), join(r.target, "NOTES.md"));
+    await fs.mkdir(join(r.target, ".claude"));
+    await fs.symlink(join(elsewhere, "NOTES.md"), join(r.target, ".claude", "linked.md"));
+    const { meta } = await lib.findMeta(r.target);
+    const s = await lib.syncGroupFiles({ dir: r.target, meta: { ...meta, copied: [".codex", "NOTES.md", ".claude"] } });
+    assert.deepEqual(s.failures, []);
+    for (const p of [".codex", "NOTES.md", ".claude/linked.md"]) assert.equal(await isLink(join(r.target, p)), false, `${p} is now a real copy`);
+    await fs.writeFile(join(r.target, ".codex", "config.toml"), "changed in group\n");
+    assert.equal(await fs.readFile(join(elsewhere, "codex", "config.toml"), "utf8"), "model = \"o3\"\n", "the shared data is untouched");
+  });
+
+  test("a broken link is reported, not copied", async () => {
+    const parent = await makeParent(["a"]);
+    await fs.symlink(join(parent, "missing"), join(parent, "dangling"));
+    const r = await lib.createWorktreeGroup({ groupsRoot: root(parent), source: parent, branch: "b", repos: [], files: ["dangling"] });
+    assert.equal(r.copyFailures.length, 1);
+    assert.match(r.copyFailures[0], /^dangling:/);
+  });
+});

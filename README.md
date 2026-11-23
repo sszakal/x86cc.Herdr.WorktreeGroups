@@ -28,6 +28,8 @@ active Space's folder).
   the branch name), tick the repos (none are ticked by default) and the files to copy (agent files
   are ticked by default). A group with no repos is valid. Each repo shows whether its branch is new,
   existing, remote-only (will track it) or in use (blocked).
+  Symlinks in the parent folder are followed: the group gets real copies, so editing them in the group never changes the
+  originals. A symlink to a repo is listed as a file, and ticking it copies the whole repo.
 - **Edit group repos**: tick to add, untick to remove. A review screen lists what will happen first.
 - **Sync shared files**: copies the files chosen at creation again, overwriting same-named ones.
 - **Open worktree group…** (Space menu, and the tab bar's **+** menu): lists your groups (open ones are
@@ -44,6 +46,36 @@ Groups live in `<worktrees.directory>/groups/<parent folder name>/<group>` (Herd
 `worktrees.directory` setting, default `~/.herdr/worktrees`). Two parents with the same folder name get
 a short hash on the second. Everything runs as `git -C <path> ...` with argument arrays, never through a
 shell, so paths with spaces are safe.
+
+## Hooks
+
+To set up tools per repo (MCP servers, agent config, ...) without the mod knowing about them, put executable
+scripts in `.worktreegroup/hooks/` of the parent folder. They are run from there (never copied into groups), with
+argument arrays and no shell. Nothing is run if a script is missing. A failing script shows a warning and undoes nothing.
+
+| Script | Arguments | cwd | Runs |
+|---|---|---|---|
+| `repo` | `added <worktree> <sourceRepo> <repo> <group> <branch>` | worktree | for each repo after Create (after files are copied) and Edit adds it |
+| `repo` | `removing <worktree> <sourceRepo> <repo> <group> <branch>` | worktree | before Edit or Delete permanently removes it |
+| `group` | `changed <group> <sourceParent> <branch> <repo>...` | group | once after Create, Edit and Sync |
+
+Use `group` to write files that list every repo: Sync copies the parent's files again, so it runs afterwards to restore them.
+Archive and Restore run no hooks.
+
+`examples/worktreegroup/hooks/` holds an example: a Serena MCP server per repo for Codex. Copy it into your parent folder
+(`cp -R examples/worktreegroup <parent>/.worktreegroup`) and adapt it.
+
+- `repo` copies a repo's untracked `.serena/project.yml` and `memories/` into the worktree when the worktree has none.
+  Committed Serena config is already there. The memories are a copy, so use a symlink if you want them shared. `cache/` is not
+  copied, so the index is rebuilt per worktree. Ignore `.serena/` in the repo so the copies are not committed.
+- `group` writes one `[mcp_servers.serena-<repo>]` per repo (`serena start-mcp-server --context codex --project <group>/<repo>`)
+  between marker lines in `<group>/.codex/config.toml`. The rest of the file (for example the parent's `.codex/config.toml`)
+  is kept, except that an existing `[mcp_servers.serena-<repo>]` for one of the group's repos (with its sub-tables) is
+  replaced by the generated one. Run `codex` in the group folder. Codex only
+  reads a project's `.codex/config.toml` once you trust the folder.
+
+One Serena server serves one project, so each repo gets its own server (and language server). In the group root, Serena's
+`--project-from-cwd` finds nothing: the root has no `.git` and no `.serena/project.yml`.
 
 ## Install
 
@@ -83,4 +115,5 @@ The dialogs need Herdr itself: use `herdr-app check mods/worktree-group` and try
 
 - Local Spaces only (remote machines are not supported).
 - Uses `find`, `cp`, `rm` and friends: Linux, and probably macOS (CI runs both). Windows is not supported yet.
+- Hooks are run directly (they need a `#!` line and `chmod +x`).
 - Design notes for archiving: `docs/archive-feature-plan.md`.
