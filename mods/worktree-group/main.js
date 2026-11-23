@@ -42,6 +42,7 @@ export default class WorktreeGroup extends View {
     this.list = [];
     this.files = []; // create: the parent folder's non-repo entries
     this.checkedFiles = new Set();
+    this.excludedFolders = [];
     this.branchInfo = {}; // repo -> inspectBranch result, for the current branch name
     this.targetInfo = null; // create: { target, taken }
     this.token = 0;
@@ -99,7 +100,8 @@ export default class WorktreeGroup extends View {
       if (found) throw new Error("This Space is already a worktree group.");
       const scan = await scanFolder(this.folder);
       this.list = scan.repos;
-      this.checked = new Set(); // repos are never preselected: the user picks explicitly
+      this.checked = new Set(scan.preselectedRepos);
+      this.excludedFolders = scan.excludedFolders;
       this.files = scan.files.map((f) => f.name);
       this.checkedFiles = new Set(scan.files.filter((f) => f.preselected).map((f) => f.name));
     } else if (this.mode === "edit") {
@@ -230,7 +232,8 @@ export default class WorktreeGroup extends View {
 
   async create() {
     const branch = cleanBranch(this.name);
-    const r = await lib.createWorktreeGroup({ groupsRoot: this.groupsRoot, source: this.folder, branch, repos: this.picked(), files: this.files.filter((f) => this.checkedFiles.has(f)) });
+    const excluded = [...new Set([...this.excludedFolders, ...this.list.filter((p) => p.includes("/"))])];
+    const r = await lib.createWorktreeGroup({ groupsRoot: this.groupsRoot, source: this.folder, branch, repos: this.picked(), files: this.files.filter((f) => this.checkedFiles.has(f)), excluded });
     if (r.copyFailures.length) toast("Some parent files were not copied", r.copyFailures.join("\n"), "warning");
     hookToast(r.hookFailures);
     run("space.new", { name: `${base(trimSlash(this.folder))} · ${branch}`, folder: r.target, focus: true });

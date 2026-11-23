@@ -15,6 +15,15 @@ export const META = ".herdr-worktree-group.json";
 //   <source>/.worktreegroup/hooks/group  changed <group> <source> <branch> <repo>...                     (cwd: group)
 // A hook runs only when it exists and is executable. Failures are reported, never rolled back.
 export const HOOKS_DIR = ".worktreegroup";
+export const GROUP_CONFIG = `${HOOKS_DIR}/config.json`;
+
+export async function readGroupConfig(folder, readTextFile) {
+  try {
+    const value = JSON.parse(await readTextFile(join(folder, GROUP_CONFIG)) ?? "{}");
+    const paths = (items) => Array.isArray(items) ? items.filter((p) => typeof p === "string").map((p) => p.trim().replace(/^\.\//, "")).filter((p) => p && !p.startsWith("/") && !p.split("/").includes("..")) : [];
+    return { excludedFolders: paths(value.excludedFolders), preselectedRepos: paths(value.preselectedRepos), repos: paths(value.repos) };
+  } catch { return { excludedFolders: [], preselectedRepos: [], repos: [] }; }
+}
 
 // Parent-level entries that are ticked by default in the Create dialog (agent setup).
 export const PRESELECT = ["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".skills", ".claude", ".cursor", ".agents", ".codex"];
@@ -88,6 +97,7 @@ export function createLib({ exec, readTextFile, writeTextFile }) {
   // everything else (files, other folders, symlinks, hidden entries) is a file/folder to share.
   // -> { repos: [names], files: [{ name, preselected }] }, each sorted. Our metadata file is skipped.
   async function scanFolder(folder) {
+    const config = await readGroupConfig(folder, readTextFile);
     const all = await exec("find", [folder, "-mindepth", "1", "-maxdepth", "1"]);
     if (all.code !== 0) return { repos: [], files: [] };
     const dirs = await exec("find", [folder, "-mindepth", "1", "-maxdepth", "1", "-type", "d"]);
@@ -100,7 +110,11 @@ export function createLib({ exec, readTextFile, writeTextFile }) {
       else files.push({ name: n, preselected: PRESELECT.includes(n) });
     }
     const by = (a, b) => (a.name ?? a).localeCompare(b.name ?? b);
-    return { repos: repos.sort(by), files: files.sort(by) };
+    for (const path of config.repos) {
+      if (!repos.includes(path) && (await exists(join(folder, path, ".git")))) repos.push(path);
+    }
+    const selected = new Set(config.preselectedRepos);
+    return { repos: repos.sort(by), files: files.sort(by), preselectedRepos: [...selected], excludedFolders: config.excludedFolders };
   }
 
   const childRepos = async (folder) => (await scanFolder(folder)).repos;
@@ -109,7 +123,7 @@ export function createLib({ exec, readTextFile, writeTextFile }) {
   // gets real files and folders, never links back into the parent. A folder's contents are merged
   // into the existing folder (cp -R src dst would nest it). Symlinks already at the destination
   // (groups made before links were followed) are removed first, so nothing is written through them.
-  async function copyEntry(from, to) {
+  async function copyEntry(from, to, excluded = []) {
     if ((await exec("test", ["-L", to])).code === 0) {
       const rm = await exec("rm", ["-f", "--", to]);
       if (rm.code !== 0) return rm;
@@ -119,14 +133,35 @@ export function createLib({ exec, readTextFile, writeTextFile }) {
     if (mk.code !== 0) return mk;
     const links = await exec("find", [to, "-type", "l", "-delete"]);
     if (links.code !== 0) return links;
-    return exec("cp", ["-R", "-L", "-p", "--", `${from}/.`, `${to}/`]);
+    if (!excluded.length) return exec("cp", ["-R", "-L", "-p", "--", `${from}/.`, `${to}/`]);
+    const findArgs = ["-L", from, "-mindepth", "1"];
+    for (const path of excluded) findArgs.push("-path", join(from, path), "-prune", "-o");
+    findArgs.push("-print0");
+    const found = await exec("find", findArgs);
+    if (found.code !== 0) return found;
+    for (const path of found.stdout.split("\0").filter(Boolean)) {
+      const rel = path.slice(from.length + 1);
+      const destination = join(to, rel);
+      if ((await exec("test", ["-d", path])).code === 0) {
+        const mk = await exec("mkdir", ["-p", "--", destination]);
+        if (mk.code !== 0) return mk;
+      } else {
+        const parent = destination.slice(0, destination.lastIndexOf("/"));
+        const mk = await exec("mkdir", ["-p", "--", parent]);
+        if (mk.code !== 0) return mk;
+        const cp = await exec("cp", ["-L", "-p", "--", path, destination]);
+        if (cp.code !== 0) return cp;
+      }
+    }
+    return { code: 0, stdout: "", stderr: "" };
   }
 
-  async function copyAll(source, dest, names) {
+  async function copyAll(source, dest, names, excluded = []) {
     const copied = [];
     const failures = [];
     for (const n of names) {
-      const c = await copyEntry(join(source, n), join(dest, n));
+      const withinEntry = excluded.filter((p) => p.startsWith(`${n}/`)).map((p) => p.slice(n.length + 1));
+      const c = await copyEntry(join(source, n), join(dest, n), withinEntry);
       if (c.code === 0) copied.push(n); else failures.push(`${n}: ${c.stderr.trim()}`);
     }
     return { copied, failures };
@@ -187,6 +222,9 @@ export function createLib({ exec, readTextFile, writeTextFile }) {
 
   // git worktree add: checks out an existing branch, tracks a remote one, or creates a new one.
   async function addWorktree(repoPath, branch, target) {
+    const parent = target.slice(0, target.lastIndexOf("/"));
+    const mk = await exec("mkdir", ["-p", "--", parent]);
+    if (mk.code !== 0) return { ok: false, out: "", err: mk.stderr.trim(), created: false };
     await git(repoPath, ["worktree", "prune"]); // forget records of worktrees whose folder is gone
     const info = await inspectBranch(repoPath, branch);
     if (info.state === "in-use") return { ok: false, out: "", err: `Branch ${branch} is already checked out at ${info.usedAt}`, created: false };
@@ -254,7 +292,7 @@ export function createLib({ exec, readTextFile, writeTextFile }) {
 
   // `repos` may be empty (a group with only shared files is valid); `files` are the parent-level
   // entries to copy. -> { target, repos, copied, copyFailures }. Throws (after undoing) when a worktree fails.
-  async function createWorktreeGroup({ source, branch, repos = [], files = [], groupsRoot }) {
+  async function createWorktreeGroup({ source, branch, repos = [], files = [], excluded = [], groupsRoot }) {
     source = trimSlash(source);
     const { target, taken } = await groupTarget({ groupsRoot, source, branch });
     if (taken) throw new Error(`${target} already exists. Pick another name.`);
@@ -268,15 +306,20 @@ export function createLib({ exec, readTextFile, writeTextFile }) {
         for (const m of made) {
           await git(join(source, m.repo), ["worktree", "remove", "--force", join(target, m.repo)]);
           if (m.created) await git(join(source, m.repo), ["branch", "-D", branch]);
+          let parent = dirname(join(target, m.repo));
+          while (parent !== trimSlash(target) && parent.startsWith(`${trimSlash(target)}/`)) {
+            if ((await exec("rmdir", [parent])).code !== 0) break;
+            parent = dirname(parent);
+          }
         }
         await exec("rmdir", [target]);
         throw new Error(`${repo}: ${r.err}`);
       }
       made.push({ repo, created: r.created });
     }
-    const { copied, failures } = await copyAll(source, target, files);
+    const { copied, failures } = await copyAll(source, target, files, excluded);
     const names = made.map((m) => m.repo);
-    const meta = { version: 1, sourceParentPath: source, branchName: branch, repos: names, copied };
+    const meta = { version: 1, sourceParentPath: source, branchName: branch, repos: names, copied, excluded };
     await writeMeta(target, meta);
     const hookFailures = [...(await runRepoHooks("added", { dir: target, meta }, names)), ...(await runGroupHook({ dir: target, meta }))];
     return { target, repos: names, copied, copyFailures: failures, hookFailures };
@@ -303,7 +346,14 @@ export function createLib({ exec, readTextFile, writeTextFile }) {
     for (const repo of repos) {
       if (await exists(join(dir, repo))) hookFailures.push(...(await runRepoHooks("removing", { dir, meta }, [repo])));
       const r = await git(join(meta.sourceParentPath, repo), ["worktree", "remove", ...(force ? ["--force"] : []), join(dir, repo)]);
-      if (r.ok) removed.push(repo); else failures.push(`${repo}: ${r.err}`);
+      if (r.ok) {
+        removed.push(repo);
+        let parent = dirname(join(dir, repo));
+        while (parent !== trimSlash(dir) && parent.startsWith(`${trimSlash(dir)}/`)) {
+          if ((await exec("rmdir", [parent])).code !== 0) break;
+          parent = dirname(parent);
+        }
+      } else failures.push(`${repo}: ${r.err}`);
     }
     if (removed.length) await writeMeta(dir, { ...meta, repos: meta.repos.filter((n) => !removed.includes(n)) });
     return { removed, failures, hookFailures };
@@ -339,7 +389,7 @@ export function createLib({ exec, readTextFile, writeTextFile }) {
   // Entries that no longer exist in the source are reported as failures and left alone.
   // Then runs the `group` hook (copied files may have overwritten what it wrote). -> { copied, failures, hookFailures }
   async function syncGroupFiles({ dir, meta }) {
-    const { copied, failures } = await copyAll(meta.sourceParentPath, dir, meta.copied ?? []);
+    const { copied, failures } = await copyAll(meta.sourceParentPath, dir, meta.copied ?? [], meta.excluded ?? []);
     return { copied, failures, hookFailures: await runGroupHook({ dir, meta }) };
   }
 

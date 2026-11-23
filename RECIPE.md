@@ -20,7 +20,8 @@ Dialogs (480px wide, popover background, 18px padding, 15px semibold title, "Esc
 folder path in dim 11px text under the title):
 
 - **Create:** a name input (required, empty at first, also the branch name), the target path line, a
-  **Repositories** checklist (none ticked) and a **Files and folders to copy** checklist (agent files ticked),
+  **Repositories** checklist (none ticked), a **Files and folders to copy** checklist (agent files ticked),
+  with repo defaults and additional configured repo paths read from `<parent>/.worktreegroup/config.json`,
   a hint line, then Cancel / Create. Each repo row has a second line: "new branch from main" (dim),
   "branch exists: will be checked out" or "exists on origin/x: will track it" (amber),
   "branch in use at <path>" (red, row greyed and not tickable).
@@ -51,7 +52,10 @@ folder path in dim 11px text under the title):
 - A group may have no repos. Removing every repo leaves an empty group. Edit removes first, then adds; a repo
   that fails does not stop the others; failures show an error toast with git's message, and a dirty worktree
   hints at Force.
-- Sync re-copies only the files chosen at creation, overwriting; nothing is deleted.
+- Sync re-copies only the files chosen at creation, applying the saved folder exclusions; nothing is deleted.
+- Parent config supports `repos` (additional repo paths), `preselectedRepos` (initial repo selection), and
+  `excludedFolders` (relative paths omitted from shared copies). Configured nested repos are excluded from
+  copies of their containing shared folder.
 - Archive moves the group to `<groupsRoot>/.archive/<parent>/<group>` (`-2`, `-3` when taken): each repo with
   `git worktree move`, falling back to `mv` + `git worktree repair` when git refuses (submodules); everything else with
   `mv`; all moved back on failure. The metadata gets `archived`, `archivedAt`, `archivedFrom`; the Space closes.
